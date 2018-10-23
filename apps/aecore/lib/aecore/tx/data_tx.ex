@@ -1,53 +1,50 @@
 defmodule Aecore.Tx.DataTx do
   @moduledoc """
-  Aecore structure of a transaction data.
+  Module defining the Data transaction which encapsulates all of the different sub-transactions
   """
-  alias Aecore.Naming.Tx.NamePreClaimTx
-  alias Aecore.Naming.Tx.NameClaimTx
-  alias Aecore.Naming.Tx.NameUpdateTx
-  alias Aecore.Naming.Tx.NameTransferTx
-  alias Aecore.Naming.Tx.NameRevokeTx
+  alias Aecore.Account.{Account, AccountStateTree}
+  alias Aecore.Chain.{Chainstate, Identifier}
+  alias Aecore.Keys
   alias Aecore.Tx.DataTx
-  alias Aecore.Account.Tx.SpendTx
-  alias Aeutil.Serialization
-  alias Aeutil.Bits
-  alias Aecore.Account.Account
-  alias Aecore.Account.AccountStateTree
-  alias Aecore.Oracle.Tx.OracleExtendTx
-  alias Aecore.Oracle.Tx.OracleQueryTx
-  alias Aecore.Oracle.Tx.OracleRegistrationTx
-  alias Aecore.Oracle.Tx.OracleResponseTx
-  alias Aecore.Keys.Wallet
-  alias Aecore.Chain.Chainstate
-  alias Aecore.Chain.Worker, as: Chain
+  alias Aeutil.{Bits, Serialization, TypeToTag}
 
   require Logger
 
   @typedoc "Name of the specified transaction module"
   @type tx_types ::
-          SpendTx
-          | OracleExtendTx
-          | OracleRegistrationTx
-          | OracleQueryTx
-          | OracleResponseTx
-          | NamePreClaimTx
-          | NameClaimTx
-          | NameUpdateTx
-          | NameTransferTx
-          | NameRevokeTx
+          Aecore.Account.Tx.SpendTx
+          | Aecore.Oracle.Tx.OracleExtendTx
+          | Aecore.Oracle.Tx.OracleRegistrationTx
+          | Aecore.Oracle.Tx.OracleResponseTx
+          | Aecore.Oracle.Tx.OracleResponseTx
+          | Aecore.Naming.Tx.NamePreClaimTx
+          | Aecore.Naming.Tx.NameClaimTx
+          | Aecore.Naming.Tx.NameUpdateTx
+          | Aecore.Naming.Tx.NameTransferTx
+          | Aecore.Naming.Tx.NameRevokeTx
+          | Aecore.Channel.Tx.ChannelCreateTx
+          | Aecore.Channel.Tx.ChannelCloseMutalTx
+          | Aecore.Channel.Tx.ChannelCloseSoloTx
+          | Aecore.Channel.Tx.ChannelSlashTx
+          | Aecore.Channel.Tx.ChannelSettleTx
 
-  @typedoc "Structure of a transaction that may be added to be blockchain"
+  @typedoc "Structure of a transaction that may be added to the blockchain"
   @type payload ::
-          SpendTx.t()
-          | OracleExtendTx.t()
-          | OracleQueryTx.t()
-          | OracleRegistrationTx.t()
-          | OracleResponseTx.t()
-          | NamePreClaimTx.t()
-          | NameClaimTx.t()
-          | NameUpdateTx.t()
-          | NameTransferTx.t()
-          | NameRevokeTx.t()
+          Aecore.Account.Tx.SpendTx.t()
+          | Aecore.Oracle.Tx.OracleExtendTx.t()
+          | Aecore.Oracle.Tx.OracleRegistrationTx.t()
+          | Aecore.Oracle.Tx.OracleResponseTx.t()
+          | Aecore.Oracle.Tx.OracleResponseTx.t()
+          | Aecore.Naming.Tx.NamePreClaimTx.t()
+          | Aecore.Naming.Tx.NameClaimTx.t()
+          | Aecore.Naming.Tx.NameUpdateTx.t()
+          | Aecore.Naming.Tx.NameTransferTx.t()
+          | Aecore.Naming.Tx.NameRevokeTx.t()
+          | Aecore.Channel.Tx.ChannelCreateTx.t()
+          | Aecore.Channel.Tx.ChannelCloseMutalTx.t()
+          | Aecore.Channel.Tx.ChannelCloseSoloTx.t()
+          | Aecore.Channel.Tx.ChannelSlashTx.t()
+          | Aecore.Channel.Tx.ChannelSettleTx.t()
 
   @typedoc "Reason for the error"
   @type reason :: String.t()
@@ -62,10 +59,12 @@ defmodule Aecore.Tx.DataTx do
           ttl: non_neg_integer()
         }
 
-  @doc """
-  Definition of Aecore DataTx structure
+  @nonce_size 256
 
-  ## Parameters
+  @doc """
+  Definition of the DataTx structure
+
+  # Parameters
   - type: The type of transaction that may be added to the blockchain
   - payload: The strcuture of the specified transaction type
   - senders: The public addresses of the accounts originating the transaction. First element of this list is special - it's the main sender. Nonce is applied to main sender Account.
@@ -86,9 +85,16 @@ defmodule Aecore.Tx.DataTx do
       Aecore.Naming.Tx.NamePreClaimTx,
       Aecore.Naming.Tx.NameRevokeTx,
       Aecore.Naming.Tx.NameTransferTx,
-      Aecore.Naming.Tx.NameUpdateTx
+      Aecore.Naming.Tx.NameUpdateTx,
+      Aecore.Channel.Tx.ChannelCreateTx,
+      Aecore.Channel.Tx.ChannelCloseSoloTx,
+      Aecore.Channel.Tx.ChannelCloseMutalTx,
+      Aecore.Channel.Tx.ChannelSlashTx,
+      Aecore.Channel.Tx.ChannelSettleTx
     ]
   end
+
+  def nonce_size, do: @nonce_size
 
   @spec init(
           tx_types(),
@@ -97,22 +103,35 @@ defmodule Aecore.Tx.DataTx do
           non_neg_integer(),
           integer(),
           non_neg_integer()
-        ) :: t()
+        ) :: DataTx.t()
   def init(type, payload, senders, fee, nonce, ttl \\ 0) do
     if is_list(senders) do
+      identified_senders =
+        for sender <- senders do
+          case sender do
+            %Identifier{} ->
+              sender
+
+            address ->
+              Identifier.create_identity(address, :account)
+          end
+        end
+
       %DataTx{
         type: type,
         payload: type.init(payload),
-        senders: senders,
+        senders: identified_senders,
         nonce: nonce,
         fee: fee,
         ttl: ttl
       }
     else
+      sender = Identifier.create_identity(senders, :account)
+
       %DataTx{
         type: type,
         payload: type.init(payload),
-        senders: [senders],
+        senders: [sender],
         nonce: nonce,
         fee: fee,
         ttl: ttl
@@ -120,27 +139,41 @@ defmodule Aecore.Tx.DataTx do
     end
   end
 
-  @spec fee(t()) :: non_neg_integer()
-  def fee(%DataTx{fee: fee}) do
-    fee
+  @spec init_binary(tx_types(), map(), list(binary()), binary(), binary(), binary()) ::
+          {:ok, DataTx.t()} | {:error, String.t()}
+  def init_binary(type, payload, encoded_senders, fee, nonce, ttl) do
+    with {:ok, senders} <- Identifier.decode_list_from_binary(encoded_senders) do
+      {:ok,
+       %DataTx{
+         type: type,
+         payload: type.init(payload),
+         senders: senders,
+         fee: fee,
+         nonce: nonce,
+         ttl: ttl
+       }}
+    else
+      {:error, _} = error -> error
+    end
   end
 
-  @spec senders(t()) :: list(binary())
-  def senders(%DataTx{senders: senders}) do
-    senders
+  @spec senders(DataTx.t(), Chainstate.t()) :: list(binary())
+  def senders(%DataTx{senders: senders, type: type, payload: payload} = tx, chainstate) do
+    if chainstate_senders?(tx) do
+      type.senders_from_chainstate(payload, chainstate)
+    else
+      for sender <- senders do
+        sender.value
+      end
+    end
   end
 
-  @spec main_sender(t()) :: binary() | nil
-  def main_sender(tx) do
-    List.first(senders(tx))
+  @spec main_sender(DataTx.t(), Chainstate.t()) :: binary() | nil
+  def main_sender(tx, chainstate) do
+    List.first(senders(tx, chainstate))
   end
 
-  @spec nonce(t()) :: non_neg_integer()
-  def nonce(%DataTx{nonce: nonce}) do
-    nonce
-  end
-
-  @spec ttl(t()) :: non_neg_integer()
+  @spec ttl(DataTx.t()) :: non_neg_integer()
   def ttl(%DataTx{ttl: ttl}) do
     case ttl do
       0 -> :max_ttl
@@ -148,40 +181,29 @@ defmodule Aecore.Tx.DataTx do
     end
   end
 
-  @spec payload(t()) :: map()
-  def payload(%DataTx{payload: payload, type: type}) do
-    if Enum.member?(valid_types(), type) do
-      type.init(payload)
-    else
-      Logger.error("Call to DataTx payload with invalid transaction type")
-      %{}
-    end
+  @spec chainstate_senders?(DataTx.t()) :: boolean()
+  def chainstate_senders?(%DataTx{type: type}) do
+    type.chainstate_senders?()
   end
 
   @doc """
-  Checks whether the fee is above 0.
+  Validates the transaction without considering state
   """
-  @spec validate(t(), non_neg_integer()) :: :ok | {:error, String.t()}
-  def validate(%DataTx{fee: fee, type: type} = tx, block_height \\ Chain.top_height()) do
+  @spec validate(DataTx.t()) :: :ok | {:error, String.t()}
+  def validate(%DataTx{fee: fee, type: type, senders: senders} = tx) do
     cond do
       !Enum.member?(valid_types(), type) ->
-        {:error, "#{__MODULE__}: Invalid tx type=#{type}"}
+        {:error, "#{__MODULE__}: Invalid tx type: #{type}"}
 
       fee < 0 ->
         {:error, "#{__MODULE__}: Negative fee"}
 
-      !senders_pubkeys_size_valid?(tx.senders) ->
-        {:error, "#{__MODULE__}: Invalid senders pubkey size"}
+      !senders_valid?(senders, type.sender_type()) ->
+        {:error, "#{__MODULE__}: One or more sender identifiers invalid"}
 
       DataTx.ttl(tx) < 0 ->
         {:error,
          "#{__MODULE__}: Invalid TTL value: #{DataTx.ttl(tx)} can't be a negative integer."}
-
-      DataTx.ttl(tx) < block_height ->
-        {:error,
-         "#{__MODULE__}: Invalid or expired TTL value: #{DataTx.ttl(tx)}, with given block's height: #{
-           block_height
-         }"}
 
       true ->
         payload_validate(tx)
@@ -192,62 +214,76 @@ defmodule Aecore.Tx.DataTx do
   Changes the chainstate (account state and tx_type_state) according
   to the given transaction requirements
   """
-  @spec process_chainstate(Chainstate.t(), non_neg_integer(), t()) ::
+  @spec process_chainstate(Chainstate.t(), non_neg_integer(), DataTx.t()) ::
           {:ok, Chainstate.t()} | {:error, String.t()}
-  def process_chainstate(chainstate, block_height, %DataTx{fee: fee} = tx) do
+  def process_chainstate(chainstate, block_height, %DataTx{payload: payload, fee: fee} = tx) do
     accounts_state = chainstate.accounts
-    payload = payload(tx)
 
     tx_type_state = Map.get(chainstate, tx.type.get_chain_state_name(), %{})
 
     nonce_accounts_state =
-      if Enum.empty?(tx.senders) do
-        accounts_state
-      else
-        AccountStateTree.update(accounts_state, main_sender(tx), fn acc ->
-          Account.apply_nonce!(acc, tx.nonce)
-        end)
-      end
+      AccountStateTree.update(accounts_state, main_sender(tx, chainstate), fn acc ->
+        Account.apply_nonce!(acc, tx.nonce)
+      end)
 
-    with {:ok, {new_accounts_state, new_tx_type_state}} <-
-           nonce_accounts_state
-           |> tx.type.deduct_fee(block_height, payload, tx, fee)
-           |> tx.type.process_chainstate(
-             tx_type_state,
-             block_height,
-             payload,
-             tx
-           ) do
-      new_chainstate =
-        if tx.type.get_chain_state_name() == :accounts do
-          %{chainstate | accounts: new_accounts_state}
-        else
-          %{chainstate | accounts: new_accounts_state}
-          |> Map.put(tx.type.get_chain_state_name(), new_tx_type_state)
-        end
+    processed_states =
+      nonce_accounts_state
+      |> tx.type.deduct_fee(block_height, payload, tx, fee)
+      |> tx.type.process_chainstate(
+        tx_type_state,
+        block_height,
+        payload,
+        tx
+      )
 
-      {:ok, new_chainstate}
-    else
-      err ->
-        err
+    case processed_states do
+      {:ok, {new_accounts_state, new_tx_type_state}} ->
+        new_chainstate =
+          if tx.type.get_chain_state_name() == :accounts do
+            %{chainstate | accounts: new_accounts_state}
+          else
+            %{chainstate | accounts: new_accounts_state}
+            |> Map.put(tx.type.get_chain_state_name(), new_tx_type_state)
+          end
+
+        {:ok, new_chainstate}
+
+      error ->
+        error
     end
   end
 
-  @spec preprocess_check(Chainstate.t(), non_neg_integer(), t()) :: :ok | {:error, String.t()}
-  def preprocess_check(chainstate, block_height, tx) do
+  @doc """
+  Validates the transaction with state considered
+  """
+  @spec preprocess_check(Chainstate.t(), non_neg_integer(), DataTx.t()) ::
+          :ok | {:error, String.t()}
+  def preprocess_check(chainstate, block_height, %DataTx{payload: payload, type: type} = tx) do
     accounts_state = chainstate.accounts
-    payload = payload(tx)
-    tx_type_state = Map.get(chainstate, tx.type.get_chain_state_name(), %{})
+    tx_type_state = Map.get(chainstate, type.get_chain_state_name(), %{})
 
-    with :ok <- tx.type.preprocess_check(accounts_state, tx_type_state, block_height, payload, tx) do
-      if main_sender(tx) == nil || Account.nonce(chainstate.accounts, main_sender(tx)) < tx.nonce do
+    tx_type_preprocess_check =
+      type.preprocess_check(accounts_state, tx_type_state, block_height, payload, tx)
+
+    cond do
+      tx_type_preprocess_check != :ok ->
+        tx_type_preprocess_check
+
+      DataTx.ttl(tx) < block_height ->
+        {:error,
+         "#{__MODULE__}: Invalid or expired TTL value: #{DataTx.ttl(tx)}, with given block's height: #{
+           block_height
+         }"}
+
+      Account.nonce(chainstate.accounts, main_sender(tx, chainstate)) >= tx.nonce ->
+        {:error, "#{__MODULE__}: Transaction nonce too small #{tx.nonce}"}
+
+      !type.is_minimum_fee_met?(tx, tx_type_state, block_height) ->
+        {:error,
+         "#{__MODULE__}: Minimum fee is not met: #{type} #{tx.fee} at height: #{block_height}"}
+
+      true ->
         :ok
-      else
-        {:error, "#{__MODULE__}: Too small nonce"}
-      end
-    else
-      err ->
-        err
     end
   end
 
@@ -262,17 +298,25 @@ defmodule Aecore.Tx.DataTx do
     }
 
     if length(tx.senders) == 1 do
+      [%Identifier{value: sender}] = tx.senders
+
       Map.put(
         map_without_senders,
         "sender",
-        Serialization.serialize_value(main_sender(tx), :sender)
+        Serialization.serialize_value(sender, :sender)
       )
     else
-      Map.put(map_without_senders, "senders", Serialization.serialize_value(tx.senders, :sender))
+      new_senders = for %Identifier{value: sender} <- tx.senders, do: sender
+
+      Map.put(
+        map_without_senders,
+        "senders",
+        Serialization.serialize_value(new_senders, :senders)
+      )
     end
   end
 
-  @spec deserialize(map()) :: t()
+  @spec deserialize(map()) :: DataTx.t()
   def deserialize(%{sender: sender} = data_tx) do
     init(data_tx.type, data_tx.payload, [sender], data_tx.fee, data_tx.nonce, data_tx.ttl)
   end
@@ -281,10 +325,12 @@ defmodule Aecore.Tx.DataTx do
     init(data_tx.type, data_tx.payload, senders, data_tx.fee, data_tx.nonce, data_tx.ttl)
   end
 
+  @spec base58c_encode(binary()) :: String.t()
   def base58c_encode(bin) do
     Bits.encode58c("th", bin)
   end
 
+  @spec base58c_decode(String.t()) :: binary() | {:error, String.t()}
   def base58c_decode(<<"th$", payload::binary>>) do
     Bits.decode58(payload)
   end
@@ -296,476 +342,60 @@ defmodule Aecore.Tx.DataTx do
   @spec standard_deduct_fee(
           Chainstate.accounts(),
           non_neg_integer(),
-          t(),
+          DataTx.t(),
           non_neg_integer()
         ) :: Chainstate.accounts()
-  def standard_deduct_fee(accounts, block_height, data_tx, fee) do
-    sender = DataTx.main_sender(data_tx)
-
+  def standard_deduct_fee(
+        accounts,
+        block_height,
+        %DataTx{senders: [%Identifier{value: sender} | _]},
+        fee
+      ) do
     AccountStateTree.update(accounts, sender, fn acc ->
       Account.apply_transfer!(acc, block_height, fee * -1)
     end)
   end
 
   defp payload_validate(%DataTx{type: type, payload: payload} = data_tx) do
-    payload
-    |> type.init()
-    |> type.validate(data_tx)
+    type.validate(payload, data_tx)
   end
 
-  defp senders_pubkeys_size_valid?([sender | rest]) do
-    if Wallet.key_size_valid?(sender) do
-      senders_pubkeys_size_valid?(rest)
+  defp senders_valid?([sender | rest], sender_type) do
+    if Keys.key_size_valid?(sender) && Identifier.valid?(sender, sender_type) do
+      senders_valid?(rest, sender_type)
     else
       false
     end
   end
 
-  defp senders_pubkeys_size_valid?([]) do
+  defp senders_valid?([], _sender_type) do
     true
   end
 
-  @spec rlp_encode(non_neg_integer(), non_neg_integer(), t()) :: binary() | {:error, String.t()}
-  def rlp_encode(tag, version, term) do
-    encode(tag, version, term)
+  @spec encode_to_list(DataTx.t()) :: list()
+  def encode_to_list(%DataTx{} = tx) do
+    {:ok, tag} = TypeToTag.type_to_tag(tx.type)
+    [tag | tx.type.encode_to_list(tx.payload, tx)]
   end
 
-  defp encode(tag, version, %DataTx{type: SpendTx} = tx) do
-    list = [
-      tag,
-      version,
-      tx.senders,
-      tx.payload.receiver,
-      tx.payload.amount,
-      tx.fee,
-      tx.ttl,
-      tx.nonce,
-      tx.payload.payload
-    ]
+  @spec rlp_encode(DataTx.t()) :: binary()
+  def rlp_encode(%DataTx{} = tx) do
+    tx
+    |> encode_to_list()
+    |> ExRLP.encode()
+  end
 
-    try do
-      ExRLP.encode(list)
-    rescue
-      e -> {:error, "#{__MODULE__}: " <> Exception.message(e)}
+  @spec rlp_decode(binary()) :: {:ok, DataTx.t()} | {:error, String.t()}
+  def rlp_decode(binary) do
+    case Serialization.rlp_decode_anything(binary) do
+      {:ok, %DataTx{}} = result ->
+        result
+
+      {:ok, _} ->
+        {:error, "#{__MODULE__}: Invalid type"}
+
+      {:error, _} = error ->
+        error
     end
-  end
-
-  defp encode(tag, version, %DataTx{type: OracleRegistrationTx} = tx) do
-    ttl_type = Serialization.encode_ttl_type(tx.payload.ttl)
-
-    list = [
-      tag,
-      version,
-      tx.senders,
-      tx.nonce,
-      "$æx" <> Serialization.transform_item(tx.payload.query_format),
-      "$æx" <> Serialization.transform_item(tx.payload.response_format),
-      tx.payload.query_fee,
-      ttl_type,
-      tx.payload.ttl.ttl,
-      tx.fee,
-      tx.ttl
-    ]
-
-    try do
-      ExRLP.encode(list)
-    rescue
-      e -> {:error, "#{__MODULE__}: " <> Exception.message(e)}
-    end
-  end
-
-  defp encode(tag, version, %DataTx{type: OracleQueryTx} = tx) do
-    ttl_type_q = Serialization.encode_ttl_type(tx.payload.query_ttl)
-    ttl_type_r = Serialization.encode_ttl_type(tx.payload.response_ttl)
-
-    list = [
-      tag,
-      version,
-      tx.senders,
-      tx.nonce,
-      tx.payload.oracle_address,
-      "$æx" <> Serialization.transform_item(tx.payload.query_data),
-      tx.payload.query_fee,
-      ttl_type_q,
-      tx.payload.query_ttl.ttl,
-      ttl_type_r,
-      tx.payload.response_ttl.ttl,
-      tx.fee,
-      tx.ttl
-    ]
-
-    try do
-      ExRLP.encode(list)
-    rescue
-      e -> {:error, "#{__MODULE__}: " <> Exception.message(e)}
-    end
-  end
-
-  defp encode(tag, version, %DataTx{type: OracleResponseTx} = tx) do
-    list = [
-      tag,
-      version,
-      tx.senders,
-      tx.nonce,
-      tx.payload.query_id,
-      "$æx" <> Serialization.transform_item(tx.payload.response),
-      tx.fee,
-      tx.ttl
-    ]
-
-    try do
-      ExRLP.encode(list)
-    rescue
-      e -> {:error, "#{__MODULE__}: " <> Exception.message(e)}
-    end
-  end
-
-  defp encode(tag, version, %DataTx{type: OracleExtendTx} = tx) do
-    list = [
-      tag,
-      version,
-      tx.senders,
-      tx.nonce,
-      tx.payload.ttl,
-      tx.fee,
-      tx.ttl
-    ]
-
-    try do
-      ExRLP.encode(list)
-    rescue
-      e -> {:error, "#{__MODULE__}: " <> Exception.message(e)}
-    end
-  end
-
-  defp encode(tag, version, %DataTx{type: NamePreClaimTx} = tx) do
-    list = [
-      tag,
-      version,
-      tx.senders,
-      tx.nonce,
-      tx.payload.commitment,
-      tx.fee,
-      tx.ttl
-    ]
-
-    try do
-      ExRLP.encode(list)
-    rescue
-      e -> {:error, "#{__MODULE__}: " <> Exception.message(e)}
-    end
-  end
-
-  defp encode(tag, version, %DataTx{type: NameClaimTx} = tx) do
-    list = [
-      tag,
-      version,
-      tx.senders,
-      tx.nonce,
-      tx.payload.name,
-      tx.payload.name_salt,
-      tx.fee,
-      tx.ttl
-    ]
-
-    try do
-      ExRLP.encode(list)
-    rescue
-      e -> {:error, "#{__MODULE__}: " <> Exception.message(e)}
-    end
-  end
-
-  defp encode(tag, version, %DataTx{type: NameUpdateTx} = tx) do
-    list = [
-      tag,
-      version,
-      tx.senders,
-      tx.nonce,
-      tx.payload.hash,
-      tx.payload.client_ttl,
-      tx.payload.pointers,
-      tx.payload.expire_by,
-      tx.fee,
-      tx.ttl
-    ]
-
-    try do
-      ExRLP.encode(list)
-    rescue
-      e -> {:error, "#{__MODULE__}: " <> Exception.message(e)}
-    end
-  end
-
-  defp encode(tag, version, %DataTx{type: NameRevokeTx} = tx) do
-    list = [
-      tag,
-      version,
-      tx.senders,
-      tx.nonce,
-      tx.payload.hash,
-      tx.fee,
-      tx.ttl
-    ]
-
-    try do
-      ExRLP.encode(list)
-    rescue
-      e -> {:error, "#{__MODULE__}: " <> Exception.message(e)}
-    end
-  end
-
-  defp encode(tag, version, %DataTx{type: NameTransferTx} = tx) do
-    list = [
-      tag,
-      version,
-      tx.senders,
-      tx.nonce,
-      tx.payload.hash,
-      tx.payload.target,
-      tx.fee,
-      tx.ttl
-    ]
-
-    try do
-      ExRLP.encode(list)
-    rescue
-      e -> {:error, "#{__MODULE__}: " <> Exception.message(e)}
-    end
-  end
-
-  def rlp_encode(data) do
-    {:error, "#{__MODULE__} : Invalid DataTx serializations: #{inspect(data)}"}
-  end
-
-  @spec rlp_decode(non_neg_integer(), list()) :: tx_types() | {:error, String.t()}
-  def rlp_decode(tag, values) when is_list(values) do
-    decode(tag, values)
-  end
-
-  defp decode(SpendTx, [senders, receiver, amount, fee, ttl, nonce, payload]) do
-    {:ok, vsn} = Serialization.get_version(SpendTx)
-
-    DataTx.init(
-      SpendTx,
-      %{
-        receiver: receiver,
-        amount: Serialization.transform_item(amount, :int),
-        version: vsn,
-        payload: payload
-      },
-      senders,
-      Serialization.transform_item(fee, :int),
-      Serialization.transform_item(nonce, :int),
-      Serialization.transform_item(ttl, :int)
-    )
-  end
-
-  defp decode(OracleQueryTx, [
-         senders,
-         nonce,
-         oracle_address,
-         encoded_query_data,
-         query_fee,
-         encoded_query_ttl_type,
-         query_ttl_value,
-         encoded_response_ttl_type,
-         response_ttl_value,
-         fee,
-         ttl
-       ]) do
-    query_ttl_type =
-      encoded_query_ttl_type
-      |> Serialization.transform_item(:int)
-      |> Serialization.decode_ttl_type()
-
-    response_ttl_type =
-      encoded_response_ttl_type
-      |> Serialization.transform_item(:int)
-      |> Serialization.decode_ttl_type()
-
-    query_data = decode_format(encoded_query_data)
-
-    payload = %{
-      oracle_address: oracle_address,
-      query_data: query_data,
-      query_fee: Serialization.transform_item(query_fee, :int),
-      query_ttl: %{ttl: Serialization.transform_item(query_ttl_value, :int), type: query_ttl_type},
-      response_ttl: %{
-        ttl: Serialization.transform_item(response_ttl_value, :int),
-        type: response_ttl_type
-      }
-    }
-
-    DataTx.init(
-      OracleQueryTx,
-      payload,
-      senders,
-      Serialization.transform_item(fee, :int),
-      Serialization.transform_item(nonce, :int),
-      Serialization.transform_item(ttl, :int)
-    )
-  end
-
-  defp decode(OracleRegistrationTx, [
-         senders,
-         nonce,
-         encoded_query_format,
-         encoded_response_format,
-         query_fee,
-         encoded_ttl_type,
-         ttl_value,
-         fee,
-         ttl
-       ]) do
-    ttl_type =
-      encoded_ttl_type
-      |> Serialization.transform_item(:int)
-      |> Serialization.decode_ttl_type()
-
-    query_format = decode_format(encoded_query_format)
-
-    response_format = decode_format(encoded_response_format)
-
-    payload = %{
-      query_format: query_format,
-      response_format: response_format,
-      ttl: %{ttl: Serialization.transform_item(ttl_value, :int), type: ttl_type},
-      query_fee: Serialization.transform_item(query_fee, :int)
-    }
-
-    DataTx.init(
-      OracleRegistrationTx,
-      payload,
-      senders,
-      Serialization.transform_item(fee, :int),
-      Serialization.transform_item(nonce, :int),
-      Serialization.transform_item(ttl, :int)
-    )
-  end
-
-  defp decode(OracleResponseTx, [senders, nonce, encoded_query_id, encoded_response, fee, ttl]) do
-    query_id = decode_format(encoded_query_id)
-    response = decode_format(encoded_response)
-
-    payload = %{
-      query_id: query_id,
-      response: response
-    }
-
-    DataTx.init(
-      OracleResponseTx,
-      payload,
-      senders,
-      Serialization.transform_item(fee, :int),
-      Serialization.transform_item(nonce, :int),
-      Serialization.transform_item(ttl, :int)
-    )
-  end
-
-  defp decode(OracleExtendTx, [senders, nonce, ttl_value, fee, ttl]) do
-    payload = %{
-      ttl: Serialization.transform_item(ttl_value, :int)
-    }
-
-    DataTx.init(
-      OracleExtendTx,
-      payload,
-      senders,
-      Serialization.transform_item(fee, :int),
-      Serialization.transform_item(nonce, :int),
-      Serialization.transform_item(ttl, :int)
-    )
-  end
-
-  defp decode(NamePreClaimTx, [senders, nonce, commitment, fee, ttl]) do
-    payload = %NamePreClaimTx{commitment: commitment}
-
-    DataTx.init(
-      NamePreClaimTx,
-      payload,
-      senders,
-      Serialization.transform_item(fee, :int),
-      Serialization.transform_item(nonce, :int),
-      Serialization.transform_item(ttl, :int)
-    )
-  end
-
-  defp decode(NameClaimTx, [senders, nonce, name, name_salt, fee, ttl]) do
-    payload = %NameClaimTx{name: name, name_salt: name_salt}
-
-    DataTx.init(
-      NameClaimTx,
-      payload,
-      senders,
-      Serialization.transform_item(fee, :int),
-      Serialization.transform_item(nonce, :int),
-      Serialization.transform_item(ttl, :int)
-    )
-  end
-
-  defp decode(NameUpdateTx, [senders, nonce, hash, client_ttl, pointers, expire_by, fee, ttl]) do
-    payload = %NameUpdateTx{
-      client_ttl: Serialization.transform_item(client_ttl, :int),
-      expire_by: Serialization.transform_item(expire_by, :int),
-      hash: hash,
-      pointers: pointers
-    }
-
-    DataTx.init(
-      NameUpdateTx,
-      payload,
-      senders,
-      Serialization.transform_item(fee, :int),
-      Serialization.transform_item(nonce, :int),
-      Serialization.transform_item(ttl, :int)
-    )
-  end
-
-  defp decode(NameRevokeTx, [senders, nonce, hash, fee, ttl]) do
-    payload = %NameRevokeTx{hash: hash}
-
-    DataTx.init(
-      NameRevokeTx,
-      payload,
-      senders,
-      Serialization.transform_item(fee, :int),
-      Serialization.transform_item(nonce, :int),
-      Serialization.transform_item(ttl, :int)
-    )
-  end
-
-  defp decode(NameTransferTx, [senders, nonce, hash, recipient, fee, ttl]) do
-    payload = %NameTransferTx{hash: hash, target: recipient}
-
-    DataTx.init(
-      NameTransferTx,
-      payload,
-      senders,
-      Serialization.transform_item(fee, :int),
-      Serialization.transform_item(nonce, :int),
-      Serialization.transform_item(ttl, :int)
-    )
-  end
-
-  defp decode(tx_type, tx_data) do
-    {:error,
-     "#{__MODULE__}: Unknown DataTx structure: #{inspect(tx_type)}, TX's data: #{inspect(tx_data)} "}
-  end
-
-  # Optional function-workaround:
-  # As we have differences in value types in some fields,
-  # which means that we encode these fields different apart from what Epoch does,
-  # we need to recognize the origins of this value.
-  # My proposal is (until the problem is solved) to add
-  # specific prefix to the data before encodings, for example, "$æx"
-  # this prefix will allow us to know, how the data should be handled.
-  # But it also makes problems and inconsistency in Epoch, because they dont handle these prefixes.
-  @spec decode_format(binary()) :: binary()
-  defp decode_format(<<"$æx", binary::binary>>) do
-    Serialization.transform_item(binary, :binary)
-  end
-
-  defp decode_format(binary) when is_binary(binary) do
-    binary
   end
 end

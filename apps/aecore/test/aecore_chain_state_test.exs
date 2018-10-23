@@ -7,26 +7,29 @@ defmodule AecoreChainstateTest do
 
   alias Aecore.Account.Account
   alias Aecore.Chain.Worker, as: Chain
-  alias Aecore.Persistence.Worker, as: Persistence
-  alias Aecore.Keys.Wallet
   alias Aecore.Account.AccountStateTree
   alias Aecore.Chain.Chainstate
 
   setup do
+    Code.require_file("test_utils.ex", "./test")
+    TestUtils.clean_blockchain()
+
     on_exit(fn ->
-      Persistence.delete_all_blocks()
-      Chain.clear_state()
-      :ok
+      TestUtils.clean_blockchain()
     end)
   end
 
-  setup wallet do
+  setup do
+    %{public: a_pub_key} = :enacl.sign_keypair()
+    %{public: b_pub_key, secret: b_priv_key} = :enacl.sign_keypair()
+    %{public: c_pub_key, secret: c_priv_key} = :enacl.sign_keypair()
+
     [
-      a_pub_key: Wallet.get_public_key(),
-      b_pub_key: Wallet.get_public_key("M/0"),
-      b_priv_key: Wallet.get_private_key("m/0"),
-      c_pub_key: Wallet.get_public_key("M/1"),
-      c_priv_key: Wallet.get_private_key("m/1")
+      a_pub_key: a_pub_key,
+      b_pub_key: b_pub_key,
+      b_priv_key: b_priv_key,
+      c_pub_key: c_pub_key,
+      c_priv_key: c_priv_key
     ]
   end
 
@@ -34,10 +37,10 @@ defmodule AecoreChainstateTest do
   test "chain state", wallet do
     init_accounts_state = Chain.chain_state().accounts
 
-    {:ok, signed_tx1} =
+    signed_tx1 =
       Account.spend(wallet.b_pub_key, wallet.b_priv_key, wallet.a_pub_key, 1, 1, 2, <<"payload">>)
 
-    {:ok, signed_tx2} =
+    signed_tx2 =
       Account.spend(wallet.c_pub_key, wallet.c_priv_key, wallet.a_pub_key, 2, 1, 2, <<"payload">>)
 
     init_accounts = %{

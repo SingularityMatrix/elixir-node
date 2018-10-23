@@ -4,17 +4,15 @@ defmodule AecoreTxsPoolTest do
   """
   use ExUnit.Case
 
-  alias Aecore.Persistence.Worker, as: Persistence
   alias Aecore.Tx.Pool.Worker, as: Pool
   alias Aecore.Miner.Worker, as: Miner
   alias Aecore.Chain.Worker, as: Chain
-  alias Aecore.Tx.SignedTx
   alias Aecore.Account.Tx.SpendTx
   alias Aecore.Tx.DataTx
-  alias Aecore.Keys.Wallet
+  alias Aecore.Keys
   alias Aecore.Account.Account
 
-  setup wallet do
+  setup do
     Code.require_file("test_utils.ex", "./test")
     path = Application.get_env(:aecore, :persistence)[:path]
 
@@ -22,18 +20,21 @@ defmodule AecoreTxsPoolTest do
       File.rm_rf(path)
     end
 
-    Chain.clear_state()
+    TestUtils.clean_blockchain()
 
     on_exit(fn ->
-      Persistence.delete_all_blocks()
-      Chain.clear_state()
-      :ok
+      TestUtils.clean_blockchain()
     end)
+  end
+
+  setup do
+    %{public: b_pub_key} = :enacl.sign_keypair()
+    {pubkey, privkey} = Keys.keypair(:sign)
 
     [
-      a_pub_key: Wallet.get_public_key(),
-      priv_key: Wallet.get_private_key(),
-      b_pub_key: Wallet.get_public_key("M/0")
+      a_pub_key: pubkey,
+      priv_key: privkey,
+      b_pub_key: b_pub_key
     ]
   end
 
@@ -44,19 +45,19 @@ defmodule AecoreTxsPoolTest do
     Pool.get_and_empty_pool()
 
     nonce1 = Account.nonce(TestUtils.get_accounts_chainstate(), wallet.a_pub_key) + 1
+    :ok = Miner.mine_sync_block_to_chain()
 
-    {:ok, signed_tx1} =
-      Account.spend(
-        wallet.a_pub_key,
-        wallet.priv_key,
-        wallet.b_pub_key,
-        5,
-        10,
-        nonce1,
-        <<"payload">>
-      )
+    Account.spend(
+      wallet.a_pub_key,
+      wallet.priv_key,
+      wallet.b_pub_key,
+      5,
+      10,
+      nonce1,
+      <<"payload">>
+    )
 
-    {:ok, signed_tx2} =
+    signed_tx1 =
       Account.spend(
         wallet.a_pub_key,
         wallet.priv_key,
@@ -67,11 +68,8 @@ defmodule AecoreTxsPoolTest do
         <<"payload">>
       )
 
-    :ok = Miner.mine_sync_block_to_chain()
-
-    assert :ok = Pool.add_transaction(signed_tx1)
-    assert :ok = Pool.add_transaction(signed_tx2)
-    assert :ok = Pool.remove_transaction(signed_tx2)
+    assert Enum.count(Pool.get_pool()) == 2
+    assert :ok = Pool.remove_transaction(signed_tx1)
     assert Enum.count(Pool.get_pool()) == 1
 
     :ok = Miner.mine_sync_block_to_chain()

@@ -1,21 +1,21 @@
 defmodule AeutilSerializationTest do
   use ExUnit.Case
 
-  alias Aeutil.Serialization
   alias Aecore.Tx.DataTx
   alias Aecore.Tx.SignedTx
   alias Aecore.Account.Tx.SpendTx
   alias Aecore.Chain.Block
   alias Aecore.Chain.Header
+  alias Aecore.Chain.Identifier
 
   @tag :serialization
   test "serialize a block" do
     block = get_block()
 
-    serialized_block = Serialization.block(block, :serialize)
+    serialized_block = Block.encode_to_map(block)
 
     assert serialized_block == get_block_map()
-    assert Serialization.block(serialized_block, :deserialize) == block
+    assert Block.decode_from_map(serialized_block) == block
   end
 
   def get_block do
@@ -52,12 +52,12 @@ defmodule AeutilSerializationTest do
           data: %DataTx{
             type: SpendTx,
             payload: %SpendTx{
-              receiver: receiver,
+              receiver: %Identifier{value: receiver, type: :account},
               amount: 100,
               version: 1,
               payload: <<"some payload">>
             },
-            senders: [sender],
+            senders: [%Identifier{type: :account, value: sender}],
             nonce: 743_183_534_114,
             fee: 40,
             ttl: 0
@@ -85,7 +85,7 @@ defmodule AeutilSerializationTest do
             "type" => "Elixir.Aecore.Account.Tx.SpendTx",
             "ttl" => 0
           },
-          "signature" => "AQID"
+          "signature" => "sg$3DUz7ncyT"
         }
       ],
       "height" => 105,

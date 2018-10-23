@@ -1,26 +1,29 @@
 defmodule Aecore.Naming.NameUtil do
   @moduledoc """
-  Aecore naming utilities.
+  Module containing naming utilities.
   """
 
   alias Aeutil.Hash
   alias Aecore.Governance.GovernanceConstants
 
-  @spec normalized_namehash(String.t()) :: {:ok, binary()} | {:error, String.t()}
+  @typedoc "Reason of the error"
+  @type reason :: String.t()
+
+  @spec normalized_namehash(String.t()) :: {:ok, binary()} | {:error, reason()}
   def normalized_namehash(name) do
     case normalize_and_validate_name(name) do
       {:ok, normalized_name} -> {:ok, namehash(normalized_name)}
-      err -> err
+      {:error, _} = error -> error
     end
   end
 
-  @spec normalize_and_validate_name(String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  @spec normalize_and_validate_name(String.t()) :: {:ok, String.t()} | {:error, reason()}
   def normalize_and_validate_name(name) do
     normalized_name = normalize_name(name)
 
     case validate_normalized_name(normalized_name) do
       :ok -> {:ok, normalized_name}
-      {:error, reason} -> {:error, reason}
+      {:error, _} = error -> error
     end
   end
 
@@ -32,27 +35,40 @@ defmodule Aecore.Naming.NameUtil do
     if name == "" do
       <<0::256>>
     else
-      {label, remainder} = partition_name(name)
-      Hash.hash(namehash(remainder) <> Hash.hash(label))
+      name
+      |> String.split(GovernanceConstants.split_name_symbol())
+      |> Enum.reverse()
+      |> hash_labels()
     end
   end
 
-  @spec partition_name(String.t()) :: {String.t(), String.t()}
-  defp partition_name(name) do
-    [label | remainder] = split_name(name)
-    {label, Enum.join(remainder, GovernanceConstants.split_name_symbol())}
+  defp hash_labels([]), do: <<0::256>>
+
+  defp hash_labels([label | rest]) do
+    label_hash = Hash.hash(label)
+    rest_hash = hash_labels(rest)
+    Hash.hash(<<rest_hash::binary, label_hash::binary>>)
   end
 
-  @spec validate_normalized_name(String.t()) :: :ok | {:error, String.t()}
+  @spec validate_normalized_name(String.t()) :: :ok | {:error, reason()}
   defp validate_normalized_name(name) do
     allowed_registrar =
       GovernanceConstants.name_registrars()
-      |> Enum.any?(fn registrar -> String.ends_with?(name, registrar) end)
+      |> Enum.any?(fn registrar ->
+        name_split_count =
+          name
+          |> String.split(GovernanceConstants.split_name_symbol())
+          |> Enum.count()
+
+        String.ends_with?(name, registrar) &&
+          name_split_count == GovernanceConstants.name_split_check()
+      end)
 
     if allowed_registrar do
       validate_name_length(name)
     else
-      {:error, "#{__MODULE__}: name doesn't end with allowed registrar: #{inspect(name)}"}
+      {:error,
+       "#{__MODULE__}: name doesn't end with allowed registrar: #{inspect(name)} or consists of multiple namespaces"}
     end
   end
 
@@ -61,7 +77,7 @@ defmodule Aecore.Naming.NameUtil do
     Application.get_env(:aecore, :naming)[:max_name_length]
   end
 
-  @spec validate_name_length(String.t()) :: :ok | {:error, String.t()}
+  @spec validate_name_length(String.t()) :: :ok | {:error, reason()}
   defp validate_name_length(name) do
     case String.length(name) > 0 && String.length(name) < get_max_name_length() do
       true ->

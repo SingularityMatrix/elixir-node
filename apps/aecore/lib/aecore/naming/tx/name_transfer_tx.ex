@@ -1,25 +1,30 @@
 defmodule Aecore.Naming.Tx.NameTransferTx do
   @moduledoc """
-  Aecore structure of naming transfer.
+  Module defining the NameTransfer transaction
   """
 
-  @behaviour Aecore.Tx.Transaction
+  use Aecore.Tx.Transaction
 
-  alias Aecore.Chain.Chainstate
-  alias Aecore.Naming.Tx.NameTransferTx
-  alias Aecore.Naming.{Naming, NamingStateTree}
-  alias Aeutil.Hash
-  alias Aecore.Keys.Wallet
+  alias Aecore.Governance.GovernanceConstants
   alias Aecore.Account.AccountStateTree
+  alias Aecore.Chain.{Chainstate, Identifier}
+  alias Aecore.Keys
+  alias Aecore.Naming.NamingStateTree
+  alias Aecore.Naming.Tx.NameTransferTx
   alias Aecore.Tx.DataTx
-  alias Aecore.Tx.SignedTx
+  alias Aeutil.Hash
 
   require Logger
+
+  @version 1
+
+  @typedoc "Reason of the error"
+  @type reason :: String.t()
 
   @typedoc "Expected structure for the Transfer Transaction"
   @type payload :: %{
           hash: binary(),
-          target: Wallet.pubkey()
+          target: Keys.pubkey()
         }
 
   @typedoc "Structure that holds specific transaction info in the chainstate.
@@ -28,38 +33,49 @@ defmodule Aecore.Naming.Tx.NameTransferTx do
 
   @typedoc "Structure of the NameTransferTx Transaction type"
   @type t :: %NameTransferTx{
-          hash: binary(),
-          target: Wallet.pubkey()
+          hash: Identifier.t(),
+          target: Identifier.t()
         }
 
   @doc """
-  Definition of Aecore NameTransferTx structure
-  ## Parameters
+  Definition of the NameTransferTx structure
+  # Parameters
   - hash: hash of name to be transfered
   - target: target public key to transfer to
   """
   defstruct [:hash, :target]
-  use ExConstructor
 
   # Callbacks
 
-  @spec init(payload()) :: t()
+  @spec init(payload()) :: NameTransferTx.t()
+  def init(%{hash: %Identifier{} = identified_hash, target: %Identifier{} = identified_target}) do
+    %NameTransferTx{hash: identified_hash, target: identified_target}
+  end
+
   def init(%{hash: hash, target: target}) do
-    %NameTransferTx{hash: hash, target: target}
+    identified_name_hash = Identifier.create_identity(hash, :name)
+    identified_target = Identifier.create_identity(target, :account)
+    %NameTransferTx{hash: identified_name_hash, target: identified_target}
   end
 
   @doc """
-  Checks target and hash byte sizes
+  Validates the transaction without considering state
   """
-  @spec validate(t(), DataTx.t()) :: :ok | {:error, String.t()}
-  def validate(%NameTransferTx{hash: hash, target: target}, data_tx) do
-    senders = DataTx.senders(data_tx)
-
+  @spec validate(NameTransferTx.t(), DataTx.t()) :: :ok | {:error, reason()}
+  def validate(%NameTransferTx{hash: %Identifier{value: hash} = hash_id, target: target}, %DataTx{
+        senders: senders
+      }) do
     cond do
+      !Identifier.valid?(hash_id, :name) ->
+        {:error, "#{__MODULE__}: Invalid hash identifier: #{inspect(hash_id)}"}
+
+      !Identifier.valid?(target, :account) ->
+        {:error, "#{__MODULE__}: Invalid target identifier: #{inspect(target)}"}
+
       byte_size(hash) != Hash.get_hash_bytes_size() ->
         {:error, "#{__MODULE__}: hash bytes size not correct: #{inspect(byte_size(hash))}"}
 
-      !Wallet.key_size_valid?(target) ->
+      !Keys.key_size_valid?(target) ->
         {:error, "#{__MODULE__}: target size invalid"}
 
       length(senders) != 1 ->
@@ -70,8 +86,11 @@ defmodule Aecore.Naming.Tx.NameTransferTx do
     end
   end
 
-  @spec get_chain_state_name :: Naming.chain_state_name()
+  @spec get_chain_state_name :: atom()
   def get_chain_state_name, do: :naming
+
+  @spec sender_type() :: Identifier.type()
+  def sender_type, do: :account
 
   @doc """
   Changes the naming state for claim transfers.
@@ -80,45 +99,42 @@ defmodule Aecore.Naming.Tx.NameTransferTx do
           Chainstate.accounts(),
           tx_type_state(),
           non_neg_integer(),
-          t(),
+          NameTransferTx.t(),
           DataTx.t()
         ) :: {:ok, {Chainstate.accounts(), tx_type_state()}}
   def process_chainstate(
         accounts,
         naming_state,
         _block_height,
-        %NameTransferTx{} = tx,
+        %NameTransferTx{target: %Identifier{value: target}, hash: %Identifier{value: hash}},
         _data_tx
       ) do
-    claim_to_update = NamingStateTree.get(naming_state, tx.hash)
-    claim = %{claim_to_update | owner: tx.target}
-    updated_naming_chainstate = NamingStateTree.put(naming_state, tx.hash, claim)
+    claim_to_update = NamingStateTree.get(naming_state, hash)
+    claim = %{claim_to_update | owner: target}
+    updated_naming_chainstate = NamingStateTree.put(naming_state, hash, claim)
 
     {:ok, {accounts, updated_naming_chainstate}}
   end
 
   @doc """
-  Checks whether all the data is valid according to the NameTransferTx requirements,
-  before the transaction is executed.
+  Validates the transaction with state considered
   """
   @spec preprocess_check(
           Chainstate.accounts(),
           tx_type_state(),
           non_neg_integer(),
-          t(),
+          NameTransferTx.t(),
           DataTx.t()
-        ) :: :ok | {:error, String.t()}
+        ) :: :ok | {:error, reason()}
   def preprocess_check(
         accounts,
         naming_state,
         _block_height,
-        tx,
-        data_tx
+        %NameTransferTx{hash: %Identifier{value: hash}},
+        %DataTx{fee: fee, senders: [%Identifier{value: sender}]}
       ) do
-    sender = DataTx.main_sender(data_tx)
-    fee = DataTx.fee(data_tx)
     account_state = AccountStateTree.get(accounts, sender)
-    claim = NamingStateTree.get(naming_state, tx.hash)
+    claim = NamingStateTree.get(naming_state, hash)
 
     cond do
       account_state.balance - fee < 0 ->
@@ -142,16 +158,68 @@ defmodule Aecore.Naming.Tx.NameTransferTx do
   @spec deduct_fee(
           Chainstate.accounts(),
           non_neg_integer(),
-          t(),
+          NameTransferTx.t(),
           DataTx.t(),
           non_neg_integer()
         ) :: Chainstate.accounts()
-  def deduct_fee(accounts, block_height, _tx, data_tx, fee) do
+  def deduct_fee(accounts, block_height, _tx, %DataTx{} = data_tx, fee) do
     DataTx.standard_deduct_fee(accounts, block_height, data_tx, fee)
   end
 
-  @spec is_minimum_fee_met?(SignedTx.t()) :: boolean()
-  def is_minimum_fee_met?(tx) do
-    tx.data.fee >= Application.get_env(:aecore, :tx_data)[:minimum_fee]
+  @spec is_minimum_fee_met?(DataTx.t(), tx_type_state(), non_neg_integer()) :: boolean()
+  def is_minimum_fee_met?(%DataTx{fee: fee}, _chain_state, _block_height) do
+    fee >= GovernanceConstants.minimum_fee()
+  end
+
+  @spec encode_to_list(NameTransferTx.t(), DataTx.t()) :: list()
+  def encode_to_list(%NameTransferTx{hash: hash, target: target}, %DataTx{
+        senders: [sender],
+        nonce: nonce,
+        fee: fee,
+        ttl: ttl
+      }) do
+    [
+      :binary.encode_unsigned(@version),
+      Identifier.encode_to_binary(sender),
+      :binary.encode_unsigned(nonce),
+      Identifier.encode_to_binary(hash),
+      Identifier.encode_to_binary(target),
+      :binary.encode_unsigned(fee),
+      :binary.encode_unsigned(ttl)
+    ]
+  end
+
+  @spec decode_from_list(non_neg_integer(), list()) :: {:ok, DataTx.t()} | {:error, reason()}
+  def decode_from_list(@version, [
+        encoded_sender,
+        nonce,
+        encoded_hash,
+        encoded_recipient,
+        fee,
+        ttl
+      ]) do
+    with {:ok, hash} <- Identifier.decode_from_binary(encoded_hash),
+         {:ok, recipient} <- Identifier.decode_from_binary(encoded_recipient) do
+      payload = %NameTransferTx{hash: hash, target: recipient}
+
+      DataTx.init_binary(
+        NameTransferTx,
+        payload,
+        [encoded_sender],
+        :binary.decode_unsigned(fee),
+        :binary.decode_unsigned(nonce),
+        :binary.decode_unsigned(ttl)
+      )
+    else
+      {:error, _} = error -> error
+    end
+  end
+
+  def decode_from_list(@version, data) do
+    {:error, "#{__MODULE__}: decode_from_list: Invalid serialization: #{inspect(data)}"}
+  end
+
+  def decode_from_list(version, _) do
+    {:error, "#{__MODULE__}: decode_from_list: Unknown version #{version}"}
   end
 end

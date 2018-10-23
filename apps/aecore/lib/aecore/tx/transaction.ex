@@ -3,36 +3,43 @@ defmodule Aecore.Tx.Transaction do
   Behaviour that states all the necessary functions that every custom transaction,
   child tx of DataTx should implement to work correctly on the blockchain
   """
-  alias Aecore.Structures.SpendTx
-  alias Aecore.Tx.DataTx
-  alias Aecore.Account.Tx.SpendTx
-  alias Aecore.Naming.Tx.NamePreClaimTx
-  alias Aecore.Naming.Tx.NameClaimTx
-  alias Aecore.Naming.Tx.NameUpdateTx
-  alias Aecore.Naming.Tx.NameRevokeTx
-  alias Aecore.Naming.Tx.NameTransferTx
-  alias Aecore.Oracle.Tx.OracleExtendTx
-  alias Aecore.Oracle.Tx.OracleQueryTx
-  alias Aecore.Oracle.Tx.OracleRegistrationTx
-  alias Aecore.Oracle.Tx.OracleResponseTx
-  alias Aecore.Chain.Chainstate
 
+  defmacro __using__(_) do
+    quote location: :keep do
+      @behaviour Aecore.Tx.Transaction
+
+      @spec chainstate_senders?() :: boolean()
+      def chainstate_senders?() do
+        false
+      end
+
+      defoverridable chainstate_senders?: 0
+    end
+  end
+
+  alias Aecore.Tx.DataTx
+  alias Aecore.Chain.Identifier
   @typedoc "Arbitrary map holding all the specific elements required
   by the specified transaction type"
   @type payload :: map()
 
   @typedoc "Structure of a custom transaction"
   @type tx_types ::
-          SpendTx.t()
-          | OracleExtendTx.t()
-          | OracleQueryTx.t()
-          | OracleRegistrationTx.t()
-          | OracleResponseTx.t()
-          | NamePreClaimTx.t()
-          | NameClaimTx.t()
-          | NameUpdateTx.t()
-          | NameTransferTx.t()
-          | NameRevokeTx.t()
+          Aecore.Account.Tx.SpendTx.t()
+          | Aecore.Oracle.Tx.OracleExtendTx.t()
+          | Aecore.Oracle.Tx.OracleRegistrationTx.t()
+          | Aecore.Oracle.Tx.OracleResponseTx.t()
+          | Aecore.Oracle.Tx.OracleResponseTx.t()
+          | Aecore.Naming.Tx.NamePreClaimTx.t()
+          | Aecore.Naming.Tx.NameClaimTx.t()
+          | Aecore.Naming.Tx.NameUpdateTx.t()
+          | Aecore.Naming.Tx.NameTransferTx.t()
+          | Aecore.Naming.Tx.NameRevokeTx.t()
+          | Aecore.Channel.Tx.ChannelCreateTx.t()
+          | Aecore.Channel.Tx.ChannelCloseMutalTx.t()
+          | Aecore.Channel.Tx.ChannelCloseSoloTx.t()
+          | Aecore.Channel.Tx.ChannelSlashTx.t()
+          | Aecore.Channel.Tx.ChannelSettleTx.t()
 
   @typedoc "Reason for the error"
   @type reason :: String.t()
@@ -45,9 +52,11 @@ defmodule Aecore.Tx.Transaction do
   @doc "The name for state chain entry to be passed for processing"
   @callback get_chain_state_name() :: Chainstate.chain_state_types()
 
+  @callback sender_type() :: Identifier.type()
+
   @callback init(payload()) :: tx_types()
 
-  @callback validate(tx_types(), DataTx.t()) :: :ok | {:error, String.t()}
+  @callback validate(tx_types(), DataTx.t()) :: :ok | {:error, reason()}
 
   @doc """
   Default function for executing a given transaction type.
@@ -60,14 +69,23 @@ defmodule Aecore.Tx.Transaction do
               block_height :: non_neg_integer(),
               tx_types(),
               DataTx.t()
-            ) :: {:ok, {Chainstate.accounts(), tx_type_state()}} | {:error, String.t()}
+            ) :: {:ok, {Chainstate.accounts(), tx_type_state()}} | {:error, reason()}
+
+  @doc """
+  Default function for checking if the minimum fee is met for all transaction types.
+  """
+  @callback is_minimum_fee_met?(
+              DataTx.t(),
+              tx_type_state(),
+              block_height :: non_neg_integer()
+            ) :: boolean()
 
   @doc """
   Default preprocess_check implementation for deduction of the fee.
   You may add as many as you need additional checks
   depending on your transaction specifications.
 
-  ## Example
+  # Example
       def preprocess_check(tx, account_state, fee, nonce, %{} = tx_type_state) do
         cond do
           account_state.balance - (tx.amount + fee) < 0 ->

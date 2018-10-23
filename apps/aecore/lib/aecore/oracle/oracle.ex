@@ -3,44 +3,62 @@ defmodule Aecore.Oracle.Oracle do
   Contains wrapping functions for working with oracles, data validation and TTL calculations.
   """
 
-  alias Aecore.Oracle.Tx.OracleRegistrationTx
-  alias Aecore.Oracle.Tx.OracleQueryTx
-  alias Aecore.Oracle.Tx.OracleResponseTx
-  alias Aecore.Oracle.Tx.OracleExtendTx
+  alias Aecore.Governance.GovernanceConstants
   alias Aecore.Oracle.OracleStateTree
   alias Aecore.Account.AccountStateTree
-  alias Aecore.Tx.DataTx
-  alias Aecore.Tx.SignedTx
-  alias Aecore.Tx.Pool.Worker, as: Pool
-  alias Aecore.Keys.Wallet
+  alias Aecore.Chain.{Chainstate, Identifier}
   alias Aecore.Chain.Worker, as: Chain
-  alias Aecore.Chain.Chainstate
+  alias Aecore.Keys
+  alias Aecore.Oracle.{Oracle, OracleStateTree, OracleQuery}
+  alias Aecore.Oracle.Tx.{OracleRegistrationTx, OracleQueryTx, OracleResponseTx, OracleExtendTx}
+  alias Aecore.Tx.{DataTx, SignedTx}
+  alias Aecore.Tx.Pool.Worker, as: Pool
   alias Aeutil.PatriciaMerkleTree
-  alias Aeutil.Serialization
-  alias Aeutil.Parser
-  alias ExJsonSchema.Schema, as: JsonSchema
-  alias ExJsonSchema.Validator, as: JsonValidator
+
+  @version 1
 
   require Logger
 
+  @typedoc "Reason of the error"
+  @type reason :: String.t()
+
+  @typedoc "Oracle transactions that include TTL field"
   @type oracle_txs_with_ttl :: OracleRegistrationTx.t() | OracleQueryTx.t() | OracleExtendTx.t()
 
-  @type json_schema :: map()
-  @type json :: any()
-
+  @typedoc "Expected TTL structure for the oracle transactions"
   @type ttl :: %{ttl: non_neg_integer(), type: :relative | :absolute}
 
   @pubkey_size 33
 
+  @typedoc "Structure of the Oracle type"
+  @type t :: %Oracle{
+          owner: Keys.pubkey(),
+          query_format: binary(),
+          response_format: binary(),
+          query_fee: integer(),
+          expires: integer()
+        }
+
+  defstruct [:owner, :query_format, :response_format, :query_fee, :expires]
+  # use ExConstructor
+  use Aecore.Util.Serializable
+
   @spec register(
-          json_schema(),
-          json_schema(),
+          String.t(),
+          String.t(),
           non_neg_integer(),
           non_neg_integer(),
           ttl(),
           non_neg_integer()
         ) :: :ok | :error
-  def register(query_format, response_format, query_fee, fee, ttl, tx_ttl \\ 0) do
+  def register(
+        query_format,
+        response_format,
+        query_fee,
+        fee,
+        ttl,
+        tx_ttl \\ 0
+      ) do
     payload = %{
       query_format: query_format,
       response_format: response_format,
@@ -48,17 +66,19 @@ defmodule Aecore.Oracle.Oracle do
       ttl: ttl
     }
 
+    {pubkey, privkey} = Keys.keypair(:sign)
+
     tx_data =
       DataTx.init(
         OracleRegistrationTx,
         payload,
-        Wallet.get_public_key(),
+        pubkey,
         fee,
         Chain.lowest_valid_nonce(),
         tx_ttl
       )
 
-    {:ok, tx} = SignedTx.sign_tx(tx_data, Wallet.get_public_key(), Wallet.get_private_key())
+    {:ok, tx} = SignedTx.sign_tx(tx_data, privkey)
     Pool.add_transaction(tx)
   end
 
@@ -67,8 +87,8 @@ defmodule Aecore.Oracle.Oracle do
   and a TTL of the query and response.
   """
   @spec query(
-          Wallet.pubkey(),
-          json(),
+          Keys.pubkey(),
+          String.t(),
           non_neg_integer(),
           non_neg_integer(),
           ttl(),
@@ -84,11 +104,13 @@ defmodule Aecore.Oracle.Oracle do
       response_ttl: response_ttl
     }
 
+    {pubkey, privkey} = Keys.keypair(:sign)
+
     tx_data =
       DataTx.init(
         OracleQueryTx,
         payload,
-        Wallet.get_public_key(),
+        pubkey,
         fee,
         Chain.lowest_valid_nonce(),
         tx_ttl
@@ -97,8 +119,7 @@ defmodule Aecore.Oracle.Oracle do
     {:ok, tx} =
       SignedTx.sign_tx(
         tx_data,
-        Wallet.get_public_key(),
-        Wallet.get_private_key()
+        privkey
       )
 
     Pool.add_transaction(tx)
@@ -108,59 +129,51 @@ defmodule Aecore.Oracle.Oracle do
   Creates an oracle response transaction with the query referenced by its
   transaction hash and the data of the response.
   """
-  @spec respond(binary(), any(), non_neg_integer(), non_neg_integer()) :: :ok | :error
+  @spec respond(binary(), String.t(), non_neg_integer(), non_neg_integer()) :: :ok | :error
   def respond(query_id, response, fee, tx_ttl \\ 0) do
-    payload = %{
+    payload = %OracleResponseTx{
       query_id: query_id,
       response: response
     }
 
-    tx_data =
-      DataTx.init(
-        OracleResponseTx,
-        payload,
-        Wallet.get_public_key(),
-        fee,
-        Chain.lowest_valid_nonce(),
-        tx_ttl
-      )
+    {pubkey, privkey} = Keys.keypair(:sign)
 
-    {:ok, tx} = SignedTx.sign_tx(tx_data, Wallet.get_public_key(), Wallet.get_private_key())
+    tx_data = %DataTx{
+      fee: fee,
+      nonce: Chain.lowest_valid_nonce(),
+      payload: payload,
+      senders: [%Identifier{type: :oracle, value: pubkey}],
+      ttl: tx_ttl,
+      type: OracleResponseTx
+    }
+
+    {:ok, tx} = SignedTx.sign_tx(tx_data, privkey)
     Pool.add_transaction(tx)
   end
 
-  @spec extend(non_neg_integer(), non_neg_integer(), non_neg_integer()) :: :ok | :error
+  @spec extend(ttl(), non_neg_integer(), non_neg_integer()) :: :ok | :error
   def extend(ttl, fee, tx_ttl \\ 0) do
-    payload = %{
+    payload = %OracleExtendTx{
       ttl: ttl
     }
 
-    tx_data =
-      DataTx.init(
-        OracleExtendTx,
-        payload,
-        Wallet.get_public_key(),
-        fee,
-        Chain.lowest_valid_nonce(),
-        tx_ttl
-      )
+    {pubkey, privkey} = Keys.keypair(:sign)
 
-    {:ok, tx} = SignedTx.sign_tx(tx_data, Wallet.get_public_key(), Wallet.get_private_key())
+    tx_data = %DataTx{
+      fee: fee,
+      nonce: Chain.lowest_valid_nonce(),
+      payload: payload,
+      senders: [%Identifier{type: :oracle, value: pubkey}],
+      ttl: tx_ttl,
+      type: OracleExtendTx
+    }
+
+    {:ok, tx} = SignedTx.sign_tx(tx_data, privkey)
     Pool.add_transaction(tx)
   end
 
-  @spec data_valid?(map(), map()) :: true | false
-  def data_valid?(format, data) do
-    schema = JsonSchema.resolve(format)
-
-    case JsonValidator.validate(schema, data) do
-      :ok ->
-        true
-
-      {:error, [{message, _}]} ->
-        Logger.error(fn -> "#{__MODULE__}: " <> message end)
-        false
-    end
+  def calculate_minimum_fee(relative_ttl) do
+    Float.ceil(relative_ttl * GovernanceConstants.oracle_ttl_fee_per_block())
   end
 
   @spec calculate_absolute_ttl(ttl(), non_neg_integer()) :: non_neg_integer()
@@ -174,35 +187,47 @@ defmodule Aecore.Oracle.Oracle do
     end
   end
 
-  @spec calculate_relative_ttl(%{ttl: non_neg_integer(), type: :absolute}, non_neg_integer()) ::
-          non_neg_integer()
-  def calculate_relative_ttl(%{ttl: ttl, type: :absolute}, block_height) do
-    ttl - block_height
+  @spec calculate_relative_ttl(ttl(), non_neg_integer()) :: non_neg_integer()
+  def calculate_relative_ttl(%{ttl: ttl, type: type}, block_height_tx_included) do
+    case type do
+      :absolute ->
+        ttl - block_height_tx_included
+
+      :relative ->
+        ttl
+    end
   end
 
   @spec tx_ttl_is_valid?(oracle_txs_with_ttl() | SignedTx.t(), non_neg_integer()) :: boolean
   def tx_ttl_is_valid?(tx, block_height) do
     case tx do
-      %OracleRegistrationTx{} ->
-        ttl_is_valid?(tx.ttl, block_height)
+      %OracleRegistrationTx{ttl: ttl} ->
+        ttl_is_valid?(ttl, block_height)
 
-      %OracleQueryTx{} ->
+      %OracleQueryTx{query_ttl: query_ttl, response_ttl: response_ttl} ->
         response_ttl_is_valid =
-          case tx.response_ttl do
+          case response_ttl do
             %{type: :absolute} ->
               Logger.error("#{__MODULE__}: Response TTL has to be relative")
               false
 
             %{type: :relative} ->
-              ttl_is_valid?(tx.response_ttl, block_height)
+              ttl_is_valid?(response_ttl)
           end
 
-        query_ttl_is_valid = ttl_is_valid?(tx.query_ttl, block_height)
+        query_ttl_is_valid = ttl_is_valid?(query_ttl, block_height)
 
         response_ttl_is_valid && query_ttl_is_valid
 
-      %OracleExtendTx{} ->
-        tx.ttl > 0
+      %OracleExtendTx{ttl: ttl} ->
+        case ttl do
+          %{type: :absolute} ->
+            Logger.error("#{__MODULE__}: Extend TTL has to be relative")
+            false
+
+          %{type: :relative} ->
+            ttl_is_valid?(ttl)
+        end
 
       _ ->
         true
@@ -229,12 +254,19 @@ defmodule Aecore.Oracle.Oracle do
     OracleStateTree.prune(chainstate, block_height)
   end
 
-  @spec refund_sender(map(), AccountStateTree.accounts_state()) ::
+  @spec refund_sender(OracleQuery.t(), AccountStateTree.accounts_state()) ::
           AccountStateTree.accounts_state()
-  def refund_sender(query, accounts_state) do
-    if not query.has_response do
-      AccountStateTree.update(accounts_state, query.sender_address, fn account ->
-        Map.update!(account, :balance, &(&1 + query.fee))
+  def refund_sender(
+        %OracleQuery{
+          sender_address: %Identifier{value: sender_address},
+          has_response: has_response,
+          fee: fee
+        },
+        accounts_state
+      ) do
+    if not has_response do
+      AccountStateTree.update(accounts_state, sender_address, fn account ->
+        Map.update!(account, :balance, &(&1 + fee))
       end)
     else
       accounts_state
@@ -270,127 +302,34 @@ defmodule Aecore.Oracle.Oracle do
     end)
   end
 
-  @spec rlp_encode(
-          non_neg_integer(),
-          non_neg_integer(),
-          map(),
-          :oracle | :oracle_query
-        ) :: binary()
-  def rlp_encode(tag, version, %{} = oracle, :oracle) do
-    list = [
-      tag,
-      version,
-      oracle.owner,
-      Serialization.transform_item(oracle.query_format),
-      Serialization.transform_item(oracle.response_format),
-      oracle.query_fee,
-      oracle.expires
+  @spec encode_to_list(Oracle.t()) :: list()
+  def encode_to_list(%Oracle{} = oracle) do
+    [
+      :binary.encode_unsigned(@version),
+      oracle.query_format,
+      oracle.response_format,
+      :binary.encode_unsigned(oracle.query_fee),
+      :binary.encode_unsigned(oracle.expires)
     ]
-
-    try do
-      ExRLP.encode(list)
-    rescue
-      e -> {:error, "#{__MODULE__}: " <> Exception.message(e)}
-    end
   end
 
-  def rlp_encode(tag, version, %{} = oracle_query, :oracle_query) do
-    has_response =
-      case oracle_query.has_response do
-        true -> 1
-        false -> 0
-      end
-
-    response =
-      case oracle_query.response do
-        :undefined -> Parser.to_string(:undefined)
-        %{} = data -> Poison.encode!(data)
-        %DataTx{type: OracleResponseTx} = data -> data
-      end
-
-    list = [
-      tag,
-      version,
-      oracle_query.sender_address,
-      oracle_query.sender_nonce,
-      oracle_query.oracle_address,
-      Serialization.transform_item(oracle_query.query),
-      has_response,
-      response,
-      oracle_query.expires,
-      oracle_query.response_ttl,
-      oracle_query.fee
-    ]
-
-    try do
-      ExRLP.encode(list)
-    rescue
-      e -> {:error, "#{__MODULE__}: " <> Exception.message(e)}
-    end
-  end
-
-  def rlp_encode(data) do
-    {:error, "#{__MODULE__}: Invalid Oracle struct #{inspect(data)}"}
-  end
-
-  @spec rlp_decode(list(), :registered_oracle | :interaction_object) ::
-          {:ok, map()} | {:error, String.t()}
-  def rlp_decode(
-        [orc_owner, query_format, response_format, query_fee, expires],
-        :oracle
-      ) do
+  @spec decode_from_list(integer(), list()) :: {:ok, Oracle.t()} | {:error, reason()}
+  def decode_from_list(@version, [query_format, response_format, query_fee, expires]) do
     {:ok,
-     %{
-       owner: orc_owner,
-       query_format: Serialization.transform_item(query_format, :binary),
-       response_format: Serialization.transform_item(response_format, :binary),
-       query_fee: Serialization.transform_item(query_fee, :int),
-       expires: Serialization.transform_item(expires, :int)
+     %Oracle{
+       owner: %Identifier{type: :oracle},
+       query_format: query_format,
+       response_format: response_format,
+       query_fee: :binary.decode_unsigned(query_fee),
+       expires: :binary.decode_unsigned(expires)
      }}
   end
 
-  def rlp_decode(
-        [
-          sender_address,
-          sender_nonce,
-          oracle_address,
-          query,
-          has_response,
-          response,
-          expires,
-          response_ttl,
-          fee
-        ],
-        :oracle_query
-      ) do
-    has_response =
-      case Serialization.transform_item(has_response, :int) do
-        1 -> true
-        0 -> false
-      end
-
-    new_response =
-      case response do
-        "undefined" -> String.to_atom(response)
-        _ -> Serialization.transform_item(response, :binary)
-      end
-
-    {:ok,
-     %{
-       expires: Serialization.transform_item(expires, :int),
-       fee: Serialization.transform_item(fee, :int),
-       has_response: has_response,
-       oracle_address: oracle_address,
-       query: Serialization.transform_item(query, :binary),
-       response: new_response,
-       response_ttl: Serialization.transform_item(response_ttl, :int),
-       sender_address: sender_address,
-       sender_nonce: Serialization.transform_item(sender_nonce, :int)
-     }}
+  def decode_from_list(@version, data) do
+    {:error, "#{__MODULE__}: decode_from_list: Invalid serialization: #{inspect(data)}"}
   end
 
-  def rlp_decode(_) do
-    {:error,
-     "#{__MODULE__}Illegal Registered oracle state / Oracle interaction object serialization"}
+  def decode_from_list(version, _) do
+    {:error, "#{__MODULE__}: decode_from_list: Unknown version #{version}"}
   end
 end

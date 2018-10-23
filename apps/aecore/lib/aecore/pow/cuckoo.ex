@@ -11,17 +11,22 @@ defmodule Aecore.Pow.Cuckoo do
 
   require Logger
 
-  alias Aecore.Chain.BlockValidation
+  alias Aecore.Chain.Header
   alias Aecore.Pow.Hashcash
   alias Aeutil.Hash
+
+  @behaviour Aecore.Pow.PowAlgorithm
+
+  @type error() :: {:error, String.t()}
 
   @doc """
   Proof of Work verification (with difficulty check)
   """
-  @spec verify(map()) :: boolean()
-  def verify(%{target: target, pow_evidence: soln} = header) do
+  @spec verify(Header.t()) :: boolean()
+  def verify(%Header{target: target, pow_evidence: soln} = header) do
     if test_target(soln, target) do
-      process(:verify, header)
+      {:ok, response} = process(:verify, header)
+      response
     else
       false
     end
@@ -30,28 +35,25 @@ defmodule Aecore.Pow.Cuckoo do
   @doc """
   Find a nonce
   """
-  @spec generate(map()) :: {:ok, map()} | error :: term()
-  def generate(%{} = header), do: process(:generate, header)
+  @spec generate(Header.t()) :: {:ok, Header.t()} | error()
+  def generate(%Header{} = header), do: process(:generate, header)
 
-  ### =============================================================================
-  ### Internal functions
-  ### =============================================================================
   defp process(process, header) do
     with {:ok, builder} <- hash_header(builder(process, header)),
          {:ok, builder} <- get_os_cmd(builder),
          {:ok, builder} <- exec_os_cmd(builder),
          {:ok, builder} <- build_response(builder) do
       {:ok, %{response: response} = builder}
-      response
+      {:ok, response}
     else
       {:error, %{error: reason}} ->
         {:error, reason}
     end
   end
 
-  defp hash_header(%{header: header} = builder) do
-    blake2b = BlockValidation.block_header_hash(%{header | nonce: 0, pow_evidence: :no_value})
-    {:ok, %{builder | hash: pack_header_and_nonce(blake2b, header.nonce)}}
+  defp hash_header(%{header: %Header{nonce: nonce} = header} = builder) do
+    blake2b = Header.hash(%{header | nonce: 0, pow_evidence: :no_value})
+    {:ok, %{builder | hash: pack_header_and_nonce(blake2b, nonce)}}
   end
 
   defp get_os_cmd(%{process: process, hash: hash} = builder) do
@@ -89,11 +91,18 @@ defmodule Aecore.Pow.Cuckoo do
     ]
   end
 
-  defp exec_os_cmd(%{process: process, header: header, cmd: command, cmd_opt: options} = builder) do
+  defp exec_os_cmd(
+         %{
+           process: process,
+           header: %Header{pow_evidence: pow_evidence},
+           cmd: command,
+           cmd_opt: options
+         } = builder
+       ) do
     {:ok, _erlpid, ospid} = Exexec.run(command, options)
 
     if process == :verify do
-      Exexec.send(ospid, solution_to_string(header.pow_evidence))
+      Exexec.send(ospid, solution_to_string(pow_evidence))
       Exexec.send(ospid, :eof)
     end
 
@@ -119,7 +128,7 @@ defmodule Aecore.Pow.Cuckoo do
     ["export ", ldpathvar, "=../lib:$", ldpathvar, "; "]
   end
 
-  ## Consider buffer
+  # Consider buffer
   defp wait_for_result(process, buff) do
     receive do
       {:stdout, _os_pid, msg} ->
@@ -133,7 +142,7 @@ defmodule Aecore.Pow.Cuckoo do
         exit(:shutdown)
 
       {:DOWN, _, :process, _pid, :normal} ->
-        ## Here we suppose to have the whole data from the os port
+        # Here we are supposed to have the whole data from the os port
         handle_raw_data(process, buff)
 
       any ->
@@ -167,17 +176,19 @@ defmodule Aecore.Pow.Cuckoo do
     {:ok, %{builder | response: verified}}
   end
 
-  defp build_response(%{header: header, response: {:generated, soln}} = builder) do
-    if test_target(soln, header.target) do
+  defp build_response(
+         %{header: %Header{target: target} = header, response: {:generated, soln}} = builder
+       ) do
+    if test_target(soln, target) do
       {:ok, %{builder | response: %{header | pow_evidence: soln}}}
     else
       {:error, %{builder | error: :no_solution}}
     end
   end
 
-  ## White paper, section 9: rather than adjusting the nodes/edges ratio, a
-  ## hash-based difficulty is suggested: the sha256 hash of the cycle nonces
-  ## is restricted to be under the difficulty value (0 < difficulty < 2^256)
+  # White paper, section 9: rather than adjusting the nodes/edges ratio, a
+  # hash-based difficulty is suggested: the sha256 hash of the cycle nonces
+  # is restricted to be under the difficulty value (0 < difficulty < 2^256)
   @spec test_target(list(), non_neg_integer()) :: boolean()
   defp test_target(soln, target) do
     nodesize = get_node_size()
@@ -186,9 +197,9 @@ defmodule Aecore.Pow.Cuckoo do
     Hashcash.verify(hash, target)
   end
 
-  ## The Cuckoo solution is a list of uint32 integers unless the graph size is
-  ## greater than 33 (when it needs u64 to store). Hash result for difficulty
-  ## control accordingly.
+  # The Cuckoo solution is a list of uint32 integers unless the graph size is
+  # greater than 33 (when it needs u64 to store). Hash result for difficulty
+  # control accordingly.
   @spec get_node_size() :: non_neg_integer()
   defp get_node_size do
     case Application.get_env(:aecore, :pow)[:params] do
@@ -197,7 +208,7 @@ defmodule Aecore.Pow.Cuckoo do
     end
   end
 
-  ## Convert solution (a list of 42 numbers) to a binary
+  # Convert solution (a list of 42 numbers) to a binary
   defp solution_to_binary([], _Bits, acc), do: acc
 
   defp solution_to_binary([h | t], bits, acc) do
@@ -216,7 +227,7 @@ defmodule Aecore.Pow.Cuckoo do
     hash_str ++ nonce_str
   end
 
-  defp builder(process, header) do
+  defp builder(process, %Header{} = header) do
     %{
       :header => header,
       :hash => nil,

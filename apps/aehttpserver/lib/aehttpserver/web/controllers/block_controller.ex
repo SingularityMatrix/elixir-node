@@ -4,9 +4,7 @@ defmodule Aehttpserver.Web.BlockController do
   alias Aecore.Chain.Worker, as: Chain
   alias Aeutil.Serialization
   alias Aeutil.HTTPUtil
-  alias Aecore.Chain.BlockValidation
-  alias Aecore.Chain.Block
-  alias Aecore.Chain.Header
+  alias Aecore.Chain.{Block, Header, Genesis}
   alias Aeutil.Serialization
 
   def block_by_height(conn, %{"height" => height}) do
@@ -28,7 +26,7 @@ defmodule Aehttpserver.Web.BlockController do
   def block_by_hash(conn, %{"hash" => hash}) do
     case Chain.get_block_by_base58_hash(hash) do
       {:ok, block} ->
-        json(conn, Serialization.block(block, :serialize))
+        json(conn, Block.encode_to_map(block))
 
       {:error, :block_not_found} ->
         HTTPUtil.json_not_found(conn, "Block not found")
@@ -62,11 +60,11 @@ defmodule Aehttpserver.Web.BlockController do
 
     blocks_json =
       Enum.map(blocks, fn block ->
-        hash = BlockValidation.block_header_hash(block.header)
+        hash = Header.hash(block.header)
 
         %{
           "hash" => Header.base58c_encode(hash),
-          "header" => Map.delete(Serialization.block(block, :serialize), "transactions"),
+          "header" => Map.delete(Block.encode_to_map(block), "transactions"),
           "tx_count" => Enum.count(block.txs)
         }
       end)
@@ -87,7 +85,7 @@ defmodule Aehttpserver.Web.BlockController do
     to_block_hash =
       case Map.get(params, "to_block") do
         nil ->
-          BlockValidation.block_header_hash(Block.genesis_block().header)
+          Header.hash(Genesis.block().header)
 
         hash ->
           Header.base58c_decode(hash)
@@ -107,7 +105,7 @@ defmodule Aehttpserver.Web.BlockController do
 
     blocks_json =
       Enum.map(blocks, fn block ->
-        Serialization.block(block, :serialize)
+        Block.encode_to_map(block)
       end)
 
     json(conn, blocks_json)

@@ -1,3 +1,6 @@
+
+export AEVM_EXTERNAL_TEST_DIR=aevm_external
+
 #
 # build commands
 #
@@ -57,7 +60,7 @@ internal-attach:
 
 iex-node:
 	@rm -rf apps/aecore/priv/rox_db_400$(NODE_NUMBER)
-	@PERSISTENCE_PATH=apps/aecore/priv/rox_db_400$(NODE_NUMBER)/ PEER_KEYS_PATH=apps/aecore/priv/peerkeys_400$(NODE_NUMBER)/ AEWALLET_PATH=apps/aecore/priv/aewallet_400$(NODE_NUMBER)/ PORT=400$(NODE_NUMBER) SYNC_PORT=300$(NODE_NUMBER) iex -S mix phx.server
+	@PERSISTENCE_PATH=apps/aecore/priv/rox_db_400$(NODE_NUMBER)/ PEER_KEYS_PATH=apps/aecore/priv/peerkeys_400$(NODE_NUMBER)/ SIGN_KEYS_PATH=apps/aecore/priv/signkeys_400$(NODE_NUMBER)/ PORT=400$(NODE_NUMBER) SYNC_PORT=300$(NODE_NUMBER) iex -S mix phx.server
 
 #
 # utility
@@ -75,6 +78,9 @@ iex-2: iex-node
 iex-3: NODE_NUMBER=3
 iex-3: iex-node
 
+iex-n: NODE_NUMBER=$(IEX_NUM)
+iex-n: iex-node
+
 clean:
 	@rm -rf deps
 	@rm -rf _build
@@ -89,6 +95,13 @@ clean-deps: clean
 clean-deps-compile: clean-deps
 	@mix compile
 
+all-test:
+	@mix format --check-formatted
+	@mix compile --warnings-as-errors || true
+	@mix compile.xref --warnings-as-errors
+	@mix credo list
+	@mix coveralls -u --exclude disabled
+
 killall:
 	@echo "Kill all beam processes"
 	@pkill -9 beam || true
@@ -97,5 +110,14 @@ killall:
 	multinode-build, multinode-start, multinode-stop, multinode-clean \
 	dev-build, dev-start, dev-stop, dev-attach, dev-clean \
 	prod-build, prod-start, prod-stop, prod-attach, prod-clean \
-	iex-0, iex-1, iex-2, iex-3 \
+	iex-0, iex-1, iex-2, iex-3, iex-n \
  	clean, clean-deps, killall \
+
+	#
+	# AEVM
+	#
+aevm-test-deps: $(AEVM_EXTERNAL_TEST_DIR)/ethereum_tests
+
+$(AEVM_EXTERNAL_TEST_DIR)/ethereum_tests:
+	@git clone https://github.com/ethereum/tests.git $(AEVM_EXTERNAL_TEST_DIR)/ethereum_tests
+	@cd $(AEVM_EXTERNAL_TEST_DIR)/ethereum_tests && git checkout 1b019db88522abacfbd7ca03382f2bbffa5ae8f0

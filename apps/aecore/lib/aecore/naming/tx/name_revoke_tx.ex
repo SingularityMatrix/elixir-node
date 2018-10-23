@@ -1,20 +1,24 @@
 defmodule Aecore.Naming.Tx.NameRevokeTx do
   @moduledoc """
-  Aecore structure of naming Update.
+  Module defining the NameRevoke transaction
   """
 
-  @behaviour Aecore.Tx.Transaction
+  use Aecore.Tx.Transaction
 
-  alias Aecore.Chain.Chainstate
-  alias Aecore.Naming.Tx.NameRevokeTx
-  alias Aecore.Naming.{Naming, NamingStateTree}
-  alias Aeutil.Hash
   alias Aecore.Account.AccountStateTree
-  alias Aecore.Tx.DataTx
-  alias Aecore.Tx.SignedTx
+  alias Aecore.Chain.{Chainstate, Identifier}
   alias Aecore.Governance.GovernanceConstants
+  alias Aecore.Naming.NamingStateTree
+  alias Aecore.Naming.Tx.NameRevokeTx
+  alias Aecore.Tx.DataTx
+  alias Aeutil.Hash
 
   require Logger
+
+  @version 1
+
+  @typedoc "Reason of the error"
+  @type reason :: String.t()
 
   @typedoc "Expected structure for the Revoke Transaction"
   @type payload :: %{
@@ -27,32 +31,48 @@ defmodule Aecore.Naming.Tx.NameRevokeTx do
 
   @typedoc "Structure of the NameRevokeTx Transaction type"
   @type t :: %NameRevokeTx{
-          hash: binary()
+          hash: Identifier.t()
         }
 
   @doc """
-  Definition of Aecore NameRevokeTx structure
-  ## Parameters
+  Definition of the NameRevokeTx structure
+  # Parameters
   - hash: hash of name to be revoked
   """
   defstruct [:hash]
-  use ExConstructor
 
   # Callbacks
 
-  @spec init(payload()) :: t()
+  @spec init(payload() | map()) :: NameRevokeTx.t()
   def init(%{hash: hash}) do
-    %NameRevokeTx{hash: hash}
+    name_hash =
+      case hash do
+        %Identifier{value: value} ->
+          if validate_identifier(hash) == true do
+            hash
+          else
+            {:error,
+             "#{__MODULE__}: Invalid specified type: #{inspect(hash.type)}, for given data: #{
+               inspect(value)
+             }"}
+          end
+
+        non_identfied_name_hash ->
+          Identifier.create_identity(non_identfied_name_hash, :name)
+      end
+
+    %NameRevokeTx{hash: name_hash}
   end
 
   @doc """
-  Checks name hash byte size
+  Validates the transaction without considering state
   """
-  @spec validate(t(), DataTx.t()) :: :ok | {:error, String.t()}
-  def validate(%NameRevokeTx{hash: hash}, data_tx) do
-    senders = DataTx.senders(data_tx)
-
+  @spec validate(NameRevokeTx.t(), DataTx.t()) :: :ok | {:error, reason()}
+  def validate(%NameRevokeTx{hash: %Identifier{value: hash} = hash_id}, %DataTx{senders: senders}) do
     cond do
+      !Identifier.valid?(hash_id, :name) ->
+        {:error, "#{__MODULE__}: Invalid hash identifier: #{inspect(hash_id)}"}
+
       byte_size(hash) != Hash.get_hash_bytes_size() ->
         {:error, "#{__MODULE__}: hash bytes size not correct: #{inspect(byte_size(hash))}"}
 
@@ -64,8 +84,11 @@ defmodule Aecore.Naming.Tx.NameRevokeTx do
     end
   end
 
-  @spec get_chain_state_name :: Naming.chain_state_name()
+  @spec get_chain_state_name :: atom()
   def get_chain_state_name, do: :naming
+
+  @spec sender_type() :: Identifier.type()
+  def sender_type, do: :account
 
   @doc """
   Revokes a previously claimed name for one account
@@ -74,17 +97,17 @@ defmodule Aecore.Naming.Tx.NameRevokeTx do
           Chainstate.accounts(),
           tx_type_state(),
           non_neg_integer(),
-          t(),
+          NameRevokeTx.t(),
           DataTx.t()
         ) :: {:ok, {Chainstate.accounts(), tx_type_state()}}
   def process_chainstate(
         accounts,
         naming_state,
         block_height,
-        %NameRevokeTx{} = tx,
+        %NameRevokeTx{hash: %Identifier{value: value}},
         _data_tx
       ) do
-    claim_to_update = NamingStateTree.get(naming_state, tx.hash)
+    claim_to_update = NamingStateTree.get(naming_state, value)
 
     claim = %{
       claim_to_update
@@ -92,33 +115,30 @@ defmodule Aecore.Naming.Tx.NameRevokeTx do
         expires: block_height + GovernanceConstants.revoke_expiration_ttl()
     }
 
-    updated_naming_chainstate = NamingStateTree.put(naming_state, tx.hash, claim)
+    updated_naming_chainstate = NamingStateTree.put(naming_state, value, claim)
 
     {:ok, {accounts, updated_naming_chainstate}}
   end
 
   @doc """
-  Checks whether all the data is valid according to the NameRevokeTx requirements,
-  before the transaction is executed.
+  Validates the transaction with state considered
   """
   @spec preprocess_check(
           Chainstate.accounts(),
           tx_type_state(),
           non_neg_integer(),
-          t(),
+          NameRevokeTx.t(),
           DataTx.t()
-        ) :: :ok | {:error, String.t()}
+        ) :: :ok | {:error, reason()}
   def preprocess_check(
         accounts,
         naming_state,
         _block_height,
-        tx,
-        data_tx
+        %NameRevokeTx{hash: %Identifier{value: value}},
+        %DataTx{fee: fee, senders: [%Identifier{value: sender}]}
       ) do
-    sender = DataTx.main_sender(data_tx)
-    fee = DataTx.fee(data_tx)
     account_state = AccountStateTree.get(accounts, sender)
-    claim = NamingStateTree.get(naming_state, tx.hash)
+    claim = NamingStateTree.get(naming_state, value)
 
     cond do
       account_state.balance - fee < 0 ->
@@ -142,7 +162,7 @@ defmodule Aecore.Naming.Tx.NameRevokeTx do
   @spec deduct_fee(
           Chainstate.accounts(),
           non_neg_integer(),
-          t(),
+          NameRevokeTx.t(),
           DataTx.t(),
           non_neg_integer()
         ) :: Chainstate.accounts()
@@ -150,8 +170,58 @@ defmodule Aecore.Naming.Tx.NameRevokeTx do
     DataTx.standard_deduct_fee(accounts, block_height, data_tx, fee)
   end
 
-  @spec is_minimum_fee_met?(SignedTx.t()) :: boolean()
-  def is_minimum_fee_met?(tx) do
-    tx.data.fee >= Application.get_env(:aecore, :tx_data)[:minimum_fee]
+  @spec validate_identifier(Identifier.t()) :: boolean()
+  defp validate_identifier(%Identifier{value: value} = id) do
+    Identifier.create_identity(value, :name) == id
+  end
+
+  @spec is_minimum_fee_met?(DataTx.t(), tx_type_state(), non_neg_integer()) :: boolean()
+  def is_minimum_fee_met?(%DataTx{fee: fee}, _chain_state, _block_height) do
+    fee >= GovernanceConstants.minimum_fee()
+  end
+
+  @spec encode_to_list(NameRevokeTx.t(), DataTx.t()) :: list()
+  def encode_to_list(%NameRevokeTx{hash: hash}, %DataTx{
+        senders: [sender],
+        nonce: nonce,
+        fee: fee,
+        ttl: ttl
+      }) do
+    [
+      :binary.encode_unsigned(@version),
+      Identifier.encode_to_binary(sender),
+      :binary.encode_unsigned(nonce),
+      Identifier.encode_to_binary(hash),
+      :binary.encode_unsigned(fee),
+      :binary.encode_unsigned(ttl)
+    ]
+  end
+
+  @spec decode_from_list(non_neg_integer(), list()) :: {:ok, DataTx.t()} | {:error, reason()}
+  def decode_from_list(@version, [encoded_sender, nonce, encoded_hash, fee, ttl]) do
+    case Identifier.decode_from_binary(encoded_hash) do
+      {:ok, hash} ->
+        payload = %NameRevokeTx{hash: hash}
+
+        DataTx.init_binary(
+          NameRevokeTx,
+          payload,
+          [encoded_sender],
+          :binary.decode_unsigned(fee),
+          :binary.decode_unsigned(nonce),
+          :binary.decode_unsigned(ttl)
+        )
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  def decode_from_list(@version, data) do
+    {:error, "#{__MODULE__}: decode_from_list: Invalid serialization: #{inspect(data)}"}
+  end
+
+  def decode_from_list(version, _) do
+    {:error, "#{__MODULE__}: decode_from_list: Unknown version #{version}"}
   end
 end

@@ -1,40 +1,46 @@
 defmodule Aecore.Oracle.Tx.OracleQueryTx do
   @moduledoc """
-  Contains the transaction structure for oracle queries
-  and functions associated with those transactions.
+  Module defining the OracleQuery transaction
   """
 
-  @behaviour Aecore.Tx.Transaction
+  use Aecore.Tx.Transaction
 
   alias __MODULE__
+
+  alias Aecore.Governance.GovernanceConstants
+  alias Aecore.Account.{Account, AccountStateTree}
+  alias Aecore.Chain.{Chainstate, Identifier}
+  alias Aecore.Keys
+  alias Aecore.Oracle.{Oracle, OracleQuery, OracleStateTree}
   alias Aecore.Tx.DataTx
-  alias Aecore.Account.Account
-  alias Aecore.Keys.Wallet
-  alias Aecore.Chain.Worker, as: Chain
-  alias Aecore.Oracle.{Oracle, OracleStateTree}
-  alias Aeutil.Bits
-  alias Aeutil.Hash
-  alias Aecore.Account.AccountStateTree
-  alias Aecore.Chain.Chainstate
+  alias Aeutil.{Bits, Hash, Serialization}
+
+  @version 1
+
+  @typedoc "Reason of the error"
+  @type reason :: String.t()
 
   @type id :: binary()
 
+  @typedoc "Expected structure for the OracleQuery Transaction"
   @type payload :: %{
-          oracle_address: Wallet.pubkey(),
-          query_data: Oracle.json(),
+          oracle_address: Identifier.t(),
+          query_data: String.t(),
           query_fee: non_neg_integer(),
           query_ttl: Oracle.ttl(),
           response_ttl: Oracle.ttl()
         }
 
+  @typedoc "Structure of the OracleQuery Transaction type"
   @type t :: %OracleQueryTx{
-          oracle_address: Wallet.pubkey(),
-          query_data: Oracle.json(),
+          oracle_address: Identifier.t(),
+          query_data: String.t(),
           query_fee: non_neg_integer(),
           query_ttl: Oracle.ttl(),
           response_ttl: Oracle.ttl()
         }
 
+  @typedoc "Structure that holds specific transaction info in the chainstate."
   @type tx_type_state() :: Chainstate.oracles()
 
   @nonce_size 256
@@ -47,21 +53,22 @@ defmodule Aecore.Oracle.Tx.OracleQueryTx do
     :response_ttl
   ]
 
-  use ExConstructor
-
-  @spec get_chain_state_name() :: :oracles
+  @spec get_chain_state_name() :: atom()
   def get_chain_state_name, do: :oracles
 
-  @spec init(payload()) :: t()
+  @spec sender_type() :: Identifier.type()
+  def sender_type, do: :account
+
+  @spec init(payload()) :: OracleQueryTx.t()
   def init(%{
-        oracle_address: oracle_address,
+        oracle_address: %Identifier{} = identified_oracle_address,
         query_data: query_data,
         query_fee: query_fee,
         query_ttl: query_ttl,
         response_ttl: response_ttl
       }) do
     %OracleQueryTx{
-      oracle_address: oracle_address,
+      oracle_address: identified_oracle_address,
       query_data: query_data,
       query_fee: query_fee,
       query_ttl: query_ttl,
@@ -69,17 +76,36 @@ defmodule Aecore.Oracle.Tx.OracleQueryTx do
     }
   end
 
-  @spec validate(t(), DataTx.t()) :: :ok | {:error, String.t()}
+  def init(%{
+        oracle_address: oracle_address,
+        query_data: query_data,
+        query_fee: query_fee,
+        query_ttl: query_ttl,
+        response_ttl: response_ttl
+      }) do
+    identified_oracle_address = Identifier.create_identity(oracle_address, :oracle)
+
+    %OracleQueryTx{
+      oracle_address: identified_oracle_address,
+      query_data: query_data,
+      query_fee: query_fee,
+      query_ttl: query_ttl,
+      response_ttl: response_ttl
+    }
+  end
+
+  @doc """
+  Validates the transaction without considering state
+  """
+  @spec validate(OracleQueryTx.t(), DataTx.t()) :: :ok | {:error, reason()}
   def validate(
         %OracleQueryTx{
           query_ttl: query_ttl,
           response_ttl: response_ttl,
-          oracle_address: oracle_address
+          oracle_address: %Identifier{value: address} = oracle_address
         },
-        data_tx
+        %DataTx{senders: senders}
       ) do
-    senders = DataTx.senders(data_tx)
-
     cond do
       !Oracle.ttl_is_valid?(query_ttl) ->
         {:error, "#{__MODULE__}: Invalid query ttl"}
@@ -90,7 +116,10 @@ defmodule Aecore.Oracle.Tx.OracleQueryTx do
       !match?(%{type: :relative}, response_ttl) ->
         {:error, "#{__MODULE__}: Invalid ttl type"}
 
-      !Wallet.key_size_valid?(oracle_address) ->
+      !Identifier.valid?(oracle_address, :oracle) ->
+        {:error, "#{__MODULE__}: Invalid oracle identifier: #{inspect(oracle_address)}"}
+
+      !Keys.key_size_valid?(address) ->
         {:error, "#{__MODULE__}: oracle_adddress size invalid"}
 
       length(senders) != 1 ->
@@ -101,39 +130,46 @@ defmodule Aecore.Oracle.Tx.OracleQueryTx do
     end
   end
 
+  @doc """
+  Enters a query in the oracle state tree
+  """
   @spec process_chainstate(
           Chainstate.accounts(),
           tx_type_state(),
           non_neg_integer(),
-          t(),
+          OracleQueryTx.t(),
           DataTx.t()
         ) :: {:ok, {Chainstate.accounts(), tx_type_state()}}
   def process_chainstate(
         accounts,
         oracles,
         block_height,
-        %OracleQueryTx{} = tx,
-        data_tx
+        %OracleQueryTx{
+          query_fee: query_fee,
+          oracle_address: %Identifier{value: oracle_address},
+          query_data: query_data,
+          query_ttl: query_ttl,
+          response_ttl: %{ttl: response_ttl},
+          query_fee: query_fee
+        },
+        %DataTx{nonce: nonce, senders: [%Identifier{value: sender}]}
       ) do
-    sender = DataTx.main_sender(data_tx)
-    nonce = DataTx.nonce(data_tx)
-
     updated_accounts_state =
       accounts
       |> AccountStateTree.update(sender, fn acc ->
-        Account.apply_transfer!(acc, block_height, tx.query_fee * -1)
+        Account.apply_transfer!(acc, block_height, query_fee * -1)
       end)
 
-    query = %{
+    query = %OracleQuery{
       sender_address: sender,
       sender_nonce: nonce,
-      oracle_address: tx.oracle_address,
-      query: tx.query_data,
+      oracle_address: oracle_address,
+      query: query_data,
       has_response: false,
       response: :undefined,
-      expires: Oracle.calculate_absolute_ttl(tx.query_ttl, block_height),
-      response_ttl: tx.response_ttl.ttl,
-      fee: tx.query_fee
+      expires: Oracle.calculate_absolute_ttl(query_ttl, block_height),
+      response_ttl: response_ttl,
+      fee: query_fee
     }
 
     new_oracle_tree = OracleStateTree.insert_query(oracles, query)
@@ -141,46 +177,41 @@ defmodule Aecore.Oracle.Tx.OracleQueryTx do
     {:ok, {updated_accounts_state, new_oracle_tree}}
   end
 
+  @doc """
+  Validates the transaction with state considered
+  """
   @spec preprocess_check(
           Chainstate.accounts(),
           tx_type_state(),
           non_neg_integer(),
-          t(),
+          OracleQueryTx.t(),
           DataTx.t()
-        ) :: :ok | {:error, String.t()}
+        ) :: :ok | {:error, reason()}
   def preprocess_check(
         accounts,
         oracles,
         block_height,
-        tx,
-        data_tx
+        %OracleQueryTx{
+          query_fee: query_fee,
+          oracle_address: %Identifier{value: oracle_address},
+          query_data: query_data,
+          query_fee: query_fee
+        } = tx,
+        %DataTx{senders: [%Identifier{value: sender}], fee: fee}
       ) do
-    sender = DataTx.main_sender(data_tx)
-    fee = DataTx.fee(data_tx)
-
     cond do
-      AccountStateTree.get(accounts, sender).balance - fee - tx.query_fee < 0 ->
+      AccountStateTree.get(accounts, sender).balance - fee - query_fee < 0 ->
         {:error, "#{__MODULE__}: Negative balance"}
 
       !Oracle.tx_ttl_is_valid?(tx, block_height) ->
-        {:error, "#{__MODULE__}: Invalid transaction TTL: #{inspect(tx.ttl)}"}
+        {:error, "#{__MODULE__}: Invalid transaction TTL: #{inspect(tx)}"}
 
-      !OracleStateTree.exists_oracle?(oracles, tx.oracle_address) ->
+      !OracleStateTree.exists_oracle?(oracles, oracle_address) ->
         {:error, "#{__MODULE__}: No oracle registered with the address:
-         #{inspect(tx.oracle_address)}"}
+         #{inspect(oracle_address)}"}
 
-      !Oracle.data_valid?(
-        OracleStateTree.get_oracle(oracles, tx.oracle_address).query_format,
-        tx.query_data
-      ) ->
-        {:error, "#{__MODULE__}: Invalid query data: #{inspect(tx.query_data)}"}
-
-      tx.query_fee < OracleStateTree.get_oracle(oracles, tx.oracle_address).query_fee ->
-        {:error, "#{__MODULE__}: The query fee: #{inspect(tx.query_fee)} is
-         lower than the one required by the oracle"}
-
-      !is_minimum_fee_met?(tx, fee, block_height) ->
-        {:error, "#{__MODULE__}: Fee: #{inspect(fee)} is too low"}
+      !is_binary(query_data) ->
+        {:error, "#{__MODULE__}: Invalid query data: #{inspect(query_data)}"}
 
       true ->
         :ok
@@ -190,58 +221,59 @@ defmodule Aecore.Oracle.Tx.OracleQueryTx do
   @spec deduct_fee(
           Chainstate.accounts(),
           non_neg_integer(),
-          t(),
+          OracleQueryTx.t(),
           DataTx.t(),
           non_neg_integer()
         ) :: Chainstate.accounts()
-  def deduct_fee(accounts, block_height, _tx, data_tx, fee) do
+  def deduct_fee(accounts, block_height, _tx, %DataTx{} = data_tx, fee) do
     DataTx.standard_deduct_fee(accounts, block_height, data_tx, fee)
   end
 
-  @spec get_oracle_query_fee(binary()) :: non_neg_integer()
-  def get_oracle_query_fee(oracle_address) do
-    Chain.chain_state().oracles
-    |> OracleStateTree.get_oracle(oracle_address)
-    |> Map.get(:query_fee)
-  end
+  @spec is_minimum_fee_met?(DataTx.t(), tx_type_state(), non_neg_integer()) :: boolean()
+  def is_minimum_fee_met?(
+        %DataTx{
+          payload: %OracleQueryTx{
+            query_fee: query_fee,
+            oracle_address: %Identifier{value: oracle_address},
+            query_ttl: query_ttl
+          },
+          fee: fee
+        },
+        oracles_tree,
+        block_height
+      ) do
+    registered_oracle = OracleStateTree.get_oracle(oracles_tree, oracle_address)
+    tx_query_fee_is_met = registered_oracle != :none && query_fee >= registered_oracle.query_fee
 
-  @spec is_minimum_fee_met?(t(), non_neg_integer(), non_neg_integer() | nil) :: boolean()
-  def is_minimum_fee_met?(tx, fee, block_height) do
-    tx_query_fee_is_met =
-      tx.query_fee >=
-        Chain.chain_state().oracles
-        |> OracleStateTree.get_oracle(tx.oracle_address)
-        |> Map.get(:query_fee)
+    ttl_fee = fee - GovernanceConstants.oracle_query_base_fee()
 
     tx_fee_is_met =
-      case tx.query_ttl do
+      case query_ttl do
         %{ttl: ttl, type: :relative} ->
-          fee >= calculate_minimum_fee(ttl)
+          ttl_fee >= Oracle.calculate_minimum_fee(ttl)
 
-        %{ttl: ttl, type: :absolute} ->
-          if block_height != nil do
-            fee >=
-              ttl
-              |> Oracle.calculate_relative_ttl(block_height)
-              |> calculate_minimum_fee()
-          else
-            true
-          end
+        %{ttl: _ttl, type: :absolute} ->
+          ttl_fee >=
+            query_ttl
+            |> Oracle.calculate_relative_ttl(block_height)
+            |> Oracle.calculate_minimum_fee()
       end
 
     tx_fee_is_met && tx_query_fee_is_met
   end
 
-  @spec id(Wallet.pubkey(), non_neg_integer(), Wallet.pubkey()) :: binary()
+  @spec id(Keys.pubkey(), non_neg_integer(), Identifier.t()) :: binary()
   def id(sender, nonce, oracle_address) do
     bin = sender <> <<nonce::@nonce_size>> <> oracle_address
     Hash.hash(bin)
   end
 
+  @spec base58c_encode(binary()) :: binary()
   def base58c_encode(bin) do
     Bits.encode58c("qy", bin)
   end
 
+  @spec base58c_decode(binary()) :: binary() | {:error, reason()}
   def base58c_decode(<<"qy$", payload::binary>>) do
     Bits.decode58(payload)
   end
@@ -250,11 +282,93 @@ defmodule Aecore.Oracle.Tx.OracleQueryTx do
     {:error, "#{__MODULE__}: Wrong data"}
   end
 
-  @spec calculate_minimum_fee(non_neg_integer()) :: non_neg_integer()
-  defp calculate_minimum_fee(ttl) do
-    blocks_ttl_per_token = Application.get_env(:aecore, :tx_data)[:blocks_ttl_per_token]
+  @spec encode_to_list(OracleQueryTx.t(), DataTx.t()) :: list() | {:error, reason()}
+  def encode_to_list(
+        %OracleQueryTx{
+          oracle_address: oracle_address,
+          query_data: query_data,
+          query_ttl: query_ttl,
+          response_ttl: response_ttl,
+          query_fee: query_fee
+        },
+        %DataTx{senders: [sender], nonce: nonce, fee: fee, ttl: ttl}
+      ) do
+    ttl_type_q = Serialization.encode_ttl_type(query_ttl)
+    ttl_type_r = Serialization.encode_ttl_type(response_ttl)
 
-    base_fee = Application.get_env(:aecore, :tx_data)[:oracle_query_base_fee]
-    round(Float.ceil(ttl / blocks_ttl_per_token) + base_fee)
+    [
+      :binary.encode_unsigned(@version),
+      Identifier.encode_to_binary(sender),
+      :binary.encode_unsigned(nonce),
+      Identifier.encode_to_binary(oracle_address),
+      query_data,
+      :binary.encode_unsigned(query_fee),
+      ttl_type_q,
+      query_ttl.ttl,
+      ttl_type_r,
+      :binary.encode_unsigned(response_ttl.ttl),
+      :binary.encode_unsigned(fee),
+      :binary.encode_unsigned(ttl)
+    ]
+  end
+
+  @spec decode_from_list(non_neg_integer(), list()) :: {:ok, DataTx.t()} | {:error, reason()}
+  def decode_from_list(@version, [
+        encoded_sender,
+        nonce,
+        encoded_oracle_address,
+        query_data,
+        query_fee,
+        encoded_query_ttl_type,
+        query_ttl_value,
+        encoded_response_ttl_type,
+        response_ttl_value,
+        fee,
+        ttl
+      ]) do
+    query_ttl_type =
+      encoded_query_ttl_type
+      |> Serialization.decode_ttl_type()
+
+    response_ttl_type =
+      encoded_response_ttl_type
+      |> Serialization.decode_ttl_type()
+
+    case Identifier.decode_from_binary(encoded_oracle_address) do
+      {:ok, oracle_address} ->
+        payload = %{
+          oracle_address: oracle_address,
+          query_data: query_data,
+          query_fee: :binary.decode_unsigned(query_fee),
+          query_ttl: %{
+            ttl: :binary.decode_unsigned(query_ttl_value),
+            type: query_ttl_type
+          },
+          response_ttl: %{
+            ttl: :binary.decode_unsigned(response_ttl_value),
+            type: response_ttl_type
+          }
+        }
+
+        DataTx.init_binary(
+          OracleQueryTx,
+          payload,
+          [encoded_sender],
+          :binary.decode_unsigned(fee),
+          :binary.decode_unsigned(nonce),
+          :binary.decode_unsigned(ttl)
+        )
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  def decode_from_list(@version, data) do
+    {:error, "#{__MODULE__}: decode_from_list: Invalid serialization: #{inspect(data)}"}
+  end
+
+  def decode_from_list(version, _) do
+    {:error, "#{__MODULE__}: decode_from_list: Unknown version #{version}"}
   end
 end

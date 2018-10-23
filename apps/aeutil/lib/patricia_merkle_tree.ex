@@ -18,7 +18,16 @@ defmodule Aeutil.PatriciaMerkleTree do
   Depending on the name, different data base ref will
   be used for the trie creaton.
   """
-  @type trie_name :: :accounts | :txs | :proof | :oracles | :oracles_cache | :naming
+  @type trie_name ::
+          :accounts
+          | :txs
+          | :proof
+          | :oracles
+          | :oracles_cache
+          | :naming
+          | :channels
+          | :contracts
+          | :calls
 
   @spec root_hash(Trie.t()) :: binary
   def root_hash(%{root_hash: root_hash}), do: root_hash
@@ -71,7 +80,7 @@ defmodule Aeutil.PatriciaMerkleTree do
   @spec insert(Trie.t(), Trie.key(), Trie.value()) :: Trie.t() | {:error, term}
   def insert(trie, key, value) do
     case lookup(trie, key) do
-      {:ok, ^value} ->
+      {:ok, _value} ->
         {:error, :already_present}
 
       :none ->
@@ -86,9 +95,32 @@ defmodule Aeutil.PatriciaMerkleTree do
   Verify if value is present in the proof trie for the provided key.
   The key represents the path in the proof trie.
   """
-  @spec verify_proof(Trie.t(), Trie.key(), Trie.value(), Trie.t()) :: boolean
-  def verify_proof(trie, key, value, proof) do
-    Proof.verify_proof(key, value, trie.root_hash, proof)
+  @spec verify_proof?(Trie.key(), Trie.value(), binary(), Trie.t()) :: boolean
+  def verify_proof?(key, value, root_hash, proof) do
+    case Proof.verify_proof(key, value, root_hash, proof) do
+      :ok ->
+        true
+
+      {:error, _} ->
+        false
+    end
+  end
+
+  @doc """
+  Lookups the value associated with the given key in the proof trie.
+  """
+  @spec lookup_proof(Trie.key(), binary(), Trie.t()) :: {:ok, Trie.value()} | :error
+  def lookup_proof(key, root_hash, proof) do
+    case Proof.lookup_proof(key, root_hash, proof) do
+      nil ->
+        :error
+
+      {:error, _} ->
+        :error
+
+      val ->
+        {:ok, val}
+    end
   end
 
   @doc """
@@ -107,7 +139,7 @@ defmodule Aeutil.PatriciaMerkleTree do
   Providing pretty print of a given trie in the shell.
   Depending on the atom it can print structure or key value pairs. The default output is :as_struct
 
-  ## Examples
+  # Examples
 
   If we want to print as pair and no serialization is needed
       iex> Aeutil.PatriciaMerkleTree.new(:test_trie) |> Aeutil.PatriciaMerkleTree.enter("111", "val1") |> Aeutil.PatriciaMerkleTree.enter("112", "val2") |> Aeutil.PatriciaMerkleTree.print_trie([output: :as_pair, deserialize: false])
@@ -168,7 +200,7 @@ defmodule Aeutil.PatriciaMerkleTree do
     list = Inspector.all_values(trie)
 
     Enum.reduce(list, [], fn {key, val}, acc ->
-      [{key, elem(Serialization.rlp_decode(val), 1)} | acc]
+      [{key, elem(Serialization.rlp_decode_anything(val), 1)} | acc]
     end)
   end
 

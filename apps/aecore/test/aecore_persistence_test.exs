@@ -3,30 +3,26 @@ defmodule PersistenceTest do
   doctest Aecore.Persistence.Worker
 
   alias Aecore.Persistence.Worker, as: Persistence
-  alias Aecore.Keys.Wallet
+  alias Aecore.Keys
   alias Aecore.Miner.Worker, as: Miner
   alias Aecore.Chain.Worker, as: Chain
-  alias Aecore.Chain.BlockValidation
-  alias Aecore.Account.Account
-  alias Aecore.Account.AccountStateTree
+  alias Aecore.Chain.Header
+  alias Aecore.Account.{Account, AccountStateTree}
 
-  setup persistance_state do
-    Persistence.start_link([])
-    Miner.start_link([])
-
-    Chain.clear_state()
-
-    Miner.mine_sync_block_to_chain()
-    Miner.mine_sync_block_to_chain()
-    Miner.mine_sync_block_to_chain()
+  setup do
+    Code.require_file("test_utils.ex", "./test")
+    TestUtils.clean_blockchain()
+    :ok = Miner.mine_sync_block_to_chain()
+    :ok = Miner.mine_sync_block_to_chain()
+    :ok = Miner.mine_sync_block_to_chain()
 
     on_exit(fn ->
-      Persistence.delete_all_blocks()
-      Chain.clear_state()
-      :ok
+      TestUtils.clean_blockchain()
     end)
+  end
 
-    account1 = Wallet.get_public_key()
+  setup do
+    account1 = elem(Keys.keypair(:sign), 0)
 
     account2 =
       <<198, 218, 48, 178, 127, 24, 201, 115, 3, 29, 188, 220, 222, 189, 132, 139, 168, 1, 64,
@@ -38,7 +34,7 @@ defmodule PersistenceTest do
   @tag timeout: 30_000
   @tag :persistence
   test "Get last mined block by his hash from the rocksdb" do
-    hash = BlockValidation.block_header_hash(Chain.top_block().header)
+    hash = Header.hash(Chain.top_block().header)
     assert {:ok, %{header: _header}} = Persistence.get_block_by_hash(hash)
   end
 
@@ -56,14 +52,14 @@ defmodule PersistenceTest do
       Chain.chain_state().accounts
       |> Account.balance(persistance_state.account1)
 
-    ## For specific account
-    assert %{balance: correct_balance} = get_account_state(persistance_state.account1)
+    # For specific account
+    assert match?(%{balance: ^correct_balance}, get_account_state(persistance_state.account1))
 
-    ## Non existant accounts are empty
+    # Non existant accounts are empty
     assert :not_found = get_account_state(persistance_state.account2)
 
-    ## For all accounts
-    all_accounts = Persistence.get_all_chainstates(Chain.top_block_hash())
+    # For all accounts
+    {:ok, all_accounts} = Persistence.get_all_chainstates(Chain.top_block_hash())
     assert false == Enum.empty?(Map.keys(all_accounts))
   end
 
@@ -72,7 +68,8 @@ defmodule PersistenceTest do
   test "Get latest two blocks from rocksdb" do
     top_height = Chain.top_height()
 
-    Map.values(Persistence.get_blocks(2))
+    assert length(Map.values(Persistence.get_all_blocks())) == 4
+    assert length(Map.values(Persistence.get_blocks(2))) == 2
 
     [block1, block2] =
       Enum.sort(Map.values(Persistence.get_blocks(2)), fn b1, b2 ->
@@ -99,7 +96,7 @@ defmodule PersistenceTest do
 
   defp get_account_state(account) do
     root_hashes_map = Persistence.get_all_chainstates(Chain.top_block_hash())
-    chainstate = Chain.transfrom_chainstate(:to_chainstate, root_hashes_map)
+    chainstate = Chain.transform_chainstate(:to_chainstate, root_hashes_map)
     empty_account = Account.empty()
 
     case AccountStateTree.get(chainstate.accounts, account) do

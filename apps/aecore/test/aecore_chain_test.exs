@@ -5,38 +5,31 @@ defmodule AecoreChainTest do
 
   use ExUnit.Case
 
-  alias Aecore.Persistence.Worker, as: Persistence
   alias Aecore.Chain.Chainstate
   alias Aecore.Chain.Block
   alias Aecore.Chain.Header
   alias Aecore.Chain.BlockValidation
   alias Aecore.Chain.Worker, as: Chain
   alias Aecore.Miner.Worker, as: Miner
-  alias Aecore.Keys.Wallet
-  alias Aecore.Chain.Target
+  alias Aecore.Keys
   alias Aecore.Governance.GovernanceConstants
-  alias Aecore.Keys.Wallet
 
   setup do
-    # Persistence.delete_all_blocks()
-    Chain.start_link([])
+    Code.require_file("test_utils.ex", "./test")
+    TestUtils.clean_blockchain()
 
     on_exit(fn ->
-      Persistence.delete_all_blocks()
-      Chain.clear_state()
-      :ok
+      TestUtils.clean_blockchain()
     end)
-
-    []
   end
 
   @tag timeout: 100_000
   @tag :chain
-  test "add block", setup do
+  test "add block" do
     Miner.mine_sync_block_to_chain()
 
     top_block = Chain.top_block()
-    top_block_hash = BlockValidation.block_header_hash(top_block.header)
+    top_block_hash = Header.hash(top_block.header)
 
     {:ok, chain_state} = Chain.chain_state(top_block_hash)
 
@@ -45,7 +38,7 @@ defmodule AecoreChainTest do
         [],
         chain_state,
         2,
-        Wallet.get_public_key()
+        elem(Keys.keypair(:sign), 0)
       )
 
     new_root_hash = Chainstate.calculate_root_hash(new_chain_state)
@@ -58,9 +51,9 @@ defmodule AecoreChainTest do
         root_hash: new_root_hash,
         target: 553_713_663,
         nonce: 0,
-        miner: Wallet.get_public_key(),
+        miner: elem(Keys.keypair(:sign), 0),
         time: System.system_time(:milliseconds),
-        version: 14
+        version: 15
       },
       txs: []
     }
@@ -69,7 +62,7 @@ defmodule AecoreChainTest do
 
     top_block_next = Chain.top_block()
 
-    top_block_hash_next = BlockValidation.block_header_hash(top_block_next.header)
+    top_block_hash_next = Header.hash(top_block_next.header)
 
     blocks_for_target_calculation =
       Chain.get_blocks(
@@ -80,7 +73,7 @@ defmodule AecoreChainTest do
     top_block_hash_next_base58 = top_block_hash_next |> Header.base58c_encode()
     [top_block_from_chain | [previous_block | []]] = Chain.get_blocks(top_block_hash_next, 2)
 
-    previous_block_hash = BlockValidation.block_header_hash(previous_block.header)
+    previous_block_hash = Header.hash(previous_block.header)
 
     assert {:ok, top_block_from_chain} ==
              Chain.get_block_by_base58_hash(top_block_hash_next_base58)
